@@ -504,6 +504,9 @@ class ColumnBrowser(QWidget):
         self.hbox = QHBoxLayout(self.container)
         self.hbox.setContentsMargins(0, 0, 0, 0)
         self.hbox.setSpacing(0)
+        # 末尾スペーサー: カラムを常に左詰めにし、余白は右側に逃がす。
+        # （これが無いと余白が配分されてカラムが右に寄る）
+        self.hbox.addStretch(1)
         self.scroll.setWidget(self.container)
         outer.addWidget(self.scroll)
 
@@ -531,7 +534,7 @@ class ColumnBrowser(QWidget):
             ext = Path(abs_p).suffix.lower()
             it.setForeground(QColor("#e8a838" if ext == ".ma" else "#4a9eff"))
             lw.addItem(it)
-        self.hbox.addWidget(lw)
+        self.hbox.insertWidget(len(self._columns), lw)
         self._columns.append(lw)
         self._update_width()
 
@@ -589,10 +592,10 @@ class ColumnBrowser(QWidget):
             it.setData(Qt.UserRole, ("file", str(p)))
             it.setForeground(QColor("#e8a838" if ext == ".ma" else "#4a9eff"))
             lw.addItem(it)
-        self.hbox.addWidget(lw)
+        # 末尾スペーサーの手前に挿入して、カラムを左詰めで右へ伸ばしていく。
+        self.hbox.insertWidget(len(self._columns), lw)
         self._columns.append(lw)
         self._update_width()
-        QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(lw))
 
     def _trim_after(self, lw):
         """lw より右のカラムをすべて取り除く。"""
@@ -630,7 +633,9 @@ class ColumnBrowser(QWidget):
             return {"rel": p.name, "abs": str(p), "size": 0, "mtime": 0.0}
 
     def _update_width(self):
-        total = sum(w.width() for w in self._columns)
+        # setFixedWidth 済みなので minimumWidth が確定幅。実寸(width)はレイアウト前だと
+        # 未確定なため使わない。総幅をコンテナ最小幅にして、枠を超えたら水平スクロールさせる。
+        total = sum(w.minimumWidth() for w in self._columns)
         self.container.setMinimumWidth(max(1, total))
 
 
