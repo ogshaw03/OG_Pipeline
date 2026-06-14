@@ -4,8 +4,6 @@ Maya Scene Opener Pipeline Tool
 """
 
 import sys
-import os
-import re
 from pathlib import Path
 
 try:
@@ -354,10 +352,14 @@ class ScanThread(QThread):
     def run(self):
         results = []
         if not self.root.exists():
+            self.found.emit(results)
             self.finished_scan.emit(0)
             return
         try:
             for path in self.root.rglob("*"):
+                # リフレッシュ等で中断要求が来たら速やかに抜ける
+                if self.isInterruptionRequested():
+                    return
                 if path.suffix.lower() in MAYA_EXTENSIONS:
                     if self.extension_filter and path.suffix.lower() != self.extension_filter:
                         continue
@@ -499,6 +501,25 @@ class DetailPanel(QWidget):
         return f"{size:.1f} TB"
 
 
+# ─── ツリーアイテム（数値ソート対応） ──────────────────────────────────────────
+class FileTreeItem(QTreeWidgetItem):
+    """
+    SIZE / MODIFIED 列を表示用の整形文字列ではなく、
+    UserRole+1 に格納した生の数値で比較してソートするアイテム。
+    数値が無い列（フォルダ名など）は通常の文字列比較にフォールバックする。
+    """
+    SORT_ROLE = Qt.UserRole + 1
+
+    def __lt__(self, other):
+        tree = self.treeWidget()
+        col = tree.sortColumn() if tree is not None else 0
+        a = self.data(col, self.SORT_ROLE)
+        b = other.data(col, self.SORT_ROLE)
+        if a is not None and b is not None:
+            return a < b
+        return super().__lt__(other)
+
+
 # ─── メインウィンドウ ─────────────────────────────────────────────────────────
 class MayaSceneOpener(QWidget):
     """
@@ -515,6 +536,7 @@ class MayaSceneOpener(QWidget):
 
         self._all_items = []
         self._selected_path = ""
+        self._scan_thread = None
 
         self.setStyleSheet(STYLE)
         self._build_ui()
@@ -696,6 +718,12 @@ class MayaSceneOpener(QWidget):
     #  データ取得・表示
     # ════════════════════════════════════════════════════════════════════
     def _refresh(self):
+        # 実行中の古いスキャンを停止し、遅延結果による上書きを防ぐ
+        if self._scan_thread is not None and self._scan_thread.isRunning():
+            self._scan_thread.requestInterruption()
+            self._scan_thread.quit()
+            self._scan_thread.wait(3000)
+
         self.tree.clear()
         self._all_items = []
         self._selected_path = ""
@@ -709,19 +737,17 @@ class MayaSceneOpener(QWidget):
         self.statusLabel.setText(f"スキャン中: {ROOT_PATH}")
         self.refreshBtn.setEnabled(False)
 
-        ext_filter = None
-        ft = self.typeFilter.currentText()
-        if ft in (".ma", ".mb"):
-            ext_filter = ft
-
-        self._scan_thread = ScanThread(ROOT_PATH, ext_filter)
+        # スキャンは常に全 Maya ファイルを取得し、絞り込みは表示時(_filter)で行う。
+        # （スキャン時に絞ると _all_items が偏り、タイプ切替で表示が消えるため）
+        self._scan_thread = ScanThread(ROOT_PATH, None)
         self._scan_thread.found.connect(self._on_scan_done)
         self._scan_thread.finished_scan.connect(self._on_scan_finished)
         self._scan_thread.start()
 
     def _on_scan_done(self, results: list):
         self._all_items = results
-        self._populate_tree(results)
+        # 現在の検索語・タイプフィルタを反映して表示する
+        self._filter()
 
     def _on_scan_finished(self, count: int):
         self.progressBar.hide()
@@ -765,7 +791,7 @@ class MayaSceneOpener(QWidget):
                 size_str = DetailPanel._fmt_size(size)
                 type_color = "#e8a838" if ext == ".ma" else "#4a9eff"
 
-                child = QTreeWidgetItem()
+                child = FileTreeItem()
                 child.setText(0, f"    {p.name}")
                 child.setText(1, ext.upper())
                 child.setText(2, size_str)
@@ -774,6 +800,9 @@ class MayaSceneOpener(QWidget):
                 child.setForeground(2, QColor("#4a5568"))
                 child.setForeground(3, QColor("#4a5568"))
                 child.setData(0, Qt.UserRole, (rel, abs_p, size, mtime))
+                # 数値ソート用の生の値（SIZE / MODIFIED 列）
+                child.setData(2, FileTreeItem.SORT_ROLE, size)
+                child.setData(3, FileTreeItem.SORT_ROLE, mtime)
 
                 if shot == "__ROOT__":
                     self.tree.addTopLevelItem(child)
@@ -850,7 +879,6 @@ class MayaSceneOpener(QWidget):
         # Maya 内部から実行されている場合
         try:
             import maya.cmds as cmds
-            from maya import OpenMaya
 
             # 未保存の変更を確認
             if cmds.file(q=True, modified=True):
@@ -863,7 +891,19 @@ class MayaSceneOpener(QWidget):
                 if reply == QMessageBox.Cancel:
                     return
                 if reply == QMessageBox.Save:
-                    cmds.file(save=True)
+                    # 新規（未名）シーンは save できないため saveAs ダイアログを出す
+                    if cmds.file(q=True, sceneName=True):
+                        cmds.file(save=True)
+                    else:
+                        save_path, _ = QFileDialog.getSaveFileName(
+                            self, "シーンを保存", "",
+                            "Maya Files (*.ma *.mb)"
+                        )
+                        if not save_path:
+                            return  # 保存をキャンセルしたらオープンも中止
+                        ftype = "mayaAscii" if save_path.lower().endswith(".ma") else "mayaBinary"
+                        cmds.file(rename=save_path)
+                        cmds.file(save=True, type=ftype)
 
             cmds.file(path, open=True, force=True)
             self.statusLabel.setText(f"✓  シーンを開きました: {Path(path).name}")
@@ -884,7 +924,8 @@ class MayaSceneOpener(QWidget):
 
         try:
             import maya.cmds as cmds
-            cmds.file(path, i=True, type="mayaAscii" if path.endswith(".ma") else "mayaBinary",
+            cmds.file(path, i=True,
+                      type="mayaAscii" if path.lower().endswith(".ma") else "mayaBinary",
                       ignoreVersion=True, mergeNamespacesOnClash=False,
                       namespace=":", options="v=0;")
             self.statusLabel.setText(f"✓  インポートしました: {Path(path).name}")
@@ -956,3 +997,13 @@ def main():
     win.raise_()
     win.activateWindow()
     return win
+
+
+# ─── スタンドアロン実行（Maya 外での単体テスト用） ──────────────────────────────
+# Maya の外（通常のターミナル）から `python maya_scene_opener.py` で起動できる。
+# Maya 内ではこのブロックは実行されず、必ず main() を使うこと。
+if __name__ == "__main__":
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MayaSceneOpener()
+    window.show()
+    sys.exit(app.exec_() if hasattr(app, "exec_") else app.exec())
