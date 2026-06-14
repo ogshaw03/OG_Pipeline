@@ -243,8 +243,15 @@ QComboBox QAbstractItemView {
 
 /* ─── カラムブラウザ（横並びパネル） ─── */
 #columnScroll { border: none; background: #0f1117; }
+#browserCol { border-right: 1px solid #1e2435; }
+#browserColHeader {
+    background: #141824; color: #e8a838;
+    font-size: 11px; font-weight: bold; letter-spacing: 1px;
+    padding: 4px 8px;
+    border-bottom: 1px solid #2a3045;
+}
 #browserColumn {
-    background: #0f1117; border: none; border-right: 1px solid #1e2435;
+    background: #0f1117; border: none;
     color: #c8ccd4; font-family: "Consolas", monospace; font-size: 12px;
     outline: none;
 }
@@ -527,32 +534,48 @@ class ColumnBrowser(QWidget):
     def show_search_results(self, items):
         """検索結果（[(rel, abs, size, mtime), ...]）を 1 カラムにフラット表示する。"""
         self._clear_columns()
-        lw = self._make_column(width=self.COL_WIDTH * 2)
+        lw = self._make_column(f"検索結果  ({len(items)})", width=self.COL_WIDTH * 2)
         for rel, abs_p, _size, _mtime in items:
             it = QListWidgetItem(rel)
             it.setData(Qt.UserRole, ("file", abs_p))
             ext = Path(abs_p).suffix.lower()
             it.setForeground(QColor("#e8a838" if ext == ".ma" else "#4a9eff"))
             lw.addItem(it)
-        self.hbox.insertWidget(len(self._columns), lw)
+        self.hbox.insertWidget(len(self._columns), lw._container)
         self._columns.append(lw)
         self._update_width()
 
     # ── 内部処理 ──────────────────────────────────────────────
     def _clear_columns(self):
         for w in self._columns:
-            w.setParent(None)
-            w.deleteLater()
+            w._container.setParent(None)
+            w._container.deleteLater()
         self._columns = []
         self._update_width()
 
-    def _make_column(self, width=None):
+    def _make_column(self, title, width=None):
+        """ヘッダー（親フォルダ名）＋リストの複合カラムを作る。返すのはリスト本体。"""
+        container = QWidget()
+        container.setObjectName("browserCol")
+        container.setFixedWidth(width or self.COL_WIDTH)
+        v = QVBoxLayout(container)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        header = QLabel(title or "/")
+        header.setObjectName("browserColHeader")
+        header.setFixedHeight(24)
+        header.setToolTip(title or "")
+        v.addWidget(header)
+
         lw = QListWidget()
         lw.setObjectName("browserColumn")
-        lw.setFixedWidth(width or self.COL_WIDTH)
         lw.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         lw.itemClicked.connect(lambda item, w=lw: self._on_clicked(w, item))
         lw.itemDoubleClicked.connect(lambda item, w=lw: self._on_double(w, item))
+        v.addWidget(lw, 1)
+
+        lw._container = container   # クリック処理はリスト本体を参照、レイアウトは container
         return lw
 
     def _list_dir(self, dir_path):
@@ -578,7 +601,10 @@ class ColumnBrowser(QWidget):
         return dirs, files
 
     def _add_column(self, dir_path):
-        lw = self._make_column()
+        dir_path = Path(dir_path)
+        # ヘッダーにはこのカラムが表示している（＝項目の親）フォルダ名を出す。
+        title = dir_path.name or str(dir_path)
+        lw = self._make_column(title)
         dirs, files = self._list_dir(dir_path)
         for name in dirs:
             it = QListWidgetItem(f"📁  {name}")
@@ -593,7 +619,7 @@ class ColumnBrowser(QWidget):
             it.setForeground(QColor("#e8a838" if ext == ".ma" else "#4a9eff"))
             lw.addItem(it)
         # 末尾スペーサーの手前に挿入して、カラムを左詰めで右へ伸ばしていく。
-        self.hbox.insertWidget(len(self._columns), lw)
+        self.hbox.insertWidget(len(self._columns), lw._container)
         self._columns.append(lw)
         self._update_width()
 
@@ -605,8 +631,8 @@ class ColumnBrowser(QWidget):
             return
         while len(self._columns) > idx + 1:
             w = self._columns.pop()
-            w.setParent(None)
-            w.deleteLater()
+            w._container.setParent(None)
+            w._container.deleteLater()
         self._update_width()
 
     def _on_clicked(self, lw, item):
@@ -635,7 +661,7 @@ class ColumnBrowser(QWidget):
     def _update_width(self):
         # setFixedWidth 済みなので minimumWidth が確定幅。実寸(width)はレイアウト前だと
         # 未確定なため使わない。総幅をコンテナ最小幅にして、枠を超えたら水平スクロールさせる。
-        total = sum(w.minimumWidth() for w in self._columns)
+        total = sum(w._container.minimumWidth() for w in self._columns)
         self.container.setMinimumWidth(max(1, total))
 
 
