@@ -1,6 +1,8 @@
 """
 Maya Scene Opener Pipeline Tool
-ルートフォルダ: N:/projects/MDLM/source/wrk/shots
+
+ルートフォルダ（スキャン対象）はツール上で設定し、QSettings に保存される。
+コード内に固定パスは持たない。初回起動時にフォルダ選択を促す。
 """
 
 import sys
@@ -8,7 +10,7 @@ from pathlib import Path
 
 try:
     from PySide2 import QtWidgets, QtCore, QtGui
-    from PySide2.QtCore import Qt, QThread, Signal, QSize, QTimer
+    from PySide2.QtCore import Qt, QThread, Signal, QSize, QTimer, QSettings
     from PySide2.QtGui import QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QLinearGradient
     from PySide2.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -19,7 +21,7 @@ try:
 except ImportError:
     try:
         from PySide6 import QtWidgets, QtCore, QtGui
-        from PySide6.QtCore import Qt, QThread, Signal, QSize, QTimer
+        from PySide6.QtCore import Qt, QThread, Signal, QSize, QTimer, QSettings
         from PySide6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QLinearGradient
         from PySide6.QtWidgets import (
             QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -31,7 +33,10 @@ except ImportError:
         raise ImportError("PySide2 または PySide6 が必要です。")
 
 # ─── 定数 ────────────────────────────────────────────────────────────────────
-ROOT_PATH = Path(r"N:\projects\MDLM\source\wrk\shots")
+# ルートパスは固定せず、ユーザー設定（QSettings）に永続化する。
+SETTINGS_ORG = "PipelineTools"
+SETTINGS_APP = "MayaSceneOpener"
+SETTINGS_KEY_ROOT = "root_path"
 MAYA_EXTENSIONS = {".ma", ".mb"}
 
 STYLE = """
@@ -538,9 +543,19 @@ class MayaSceneOpener(QWidget):
         self._selected_path = ""
         self._scan_thread = None
 
+        # ルートパスをユーザー設定から復元（無ければ未設定）
+        self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+        saved = self.settings.value(SETTINGS_KEY_ROOT, "", type=str)
+        self.root_path = Path(saved) if saved else None
+
         self.setStyleSheet(STYLE)
         self._build_ui()
-        self._refresh()
+
+        if self.root_path is None:
+            # 初回起動: ウィンドウ表示後にフォルダ選択を促す
+            QTimer.singleShot(0, self._set_root_path)
+        else:
+            self._refresh()
 
     # ════════════════════════════════════════════════════════════════════
     #  UI 構築
@@ -609,12 +624,19 @@ class MayaSceneOpener(QWidget):
 
         layout.addStretch()
 
-        # ルートパス
-        root_path_label = QLabel(f"▸  {ROOT_PATH}")
-        root_path_label.setObjectName("rootPathLabel")
-        layout.addWidget(root_path_label)
+        # ルートパス（ユーザー設定で動的に更新）
+        self.rootPathLabel = QLabel()
+        self.rootPathLabel.setObjectName("rootPathLabel")
+        layout.addWidget(self.rootPathLabel)
+        self._update_root_label()
 
         return header
+
+    def _update_root_label(self):
+        if self.root_path:
+            self.rootPathLabel.setText(f"▸  {self.root_path}")
+        else:
+            self.rootPathLabel.setText("▸  ルート未設定")
 
     def _build_toolbar(self) -> QWidget:
         toolbar = QWidget()
@@ -652,6 +674,12 @@ class MayaSceneOpener(QWidget):
         sep.setStyleSheet("color: #1e2435;")
         layout.addWidget(sep)
 
+        # ルートフォルダ設定
+        self.rootBtn = QPushButton("📁  SET ROOT")
+        self.rootBtn.setObjectName("refreshBtn")
+        self.rootBtn.clicked.connect(self._set_root_path)
+        layout.addWidget(self.rootBtn)
+
         # リフレッシュ
         self.refreshBtn = QPushButton("↻  REFRESH")
         self.refreshBtn.setObjectName("refreshBtn")
@@ -659,6 +687,19 @@ class MayaSceneOpener(QWidget):
         layout.addWidget(self.refreshBtn)
 
         return toolbar
+
+    def _set_root_path(self):
+        """ルートフォルダをダイアログで選択し、QSettings に保存して再スキャンする。"""
+        start = str(self.root_path) if self.root_path else str(Path.home())
+        folder = QFileDialog.getExistingDirectory(
+            self, "ルートフォルダを選択", start
+        )
+        if not folder:
+            return
+        self.root_path = Path(folder)
+        self.settings.setValue(SETTINGS_KEY_ROOT, str(self.root_path))
+        self._update_root_label()
+        self._refresh()
 
     def _build_file_panel(self) -> QWidget:
         panel = QWidget()
@@ -730,16 +771,23 @@ class MayaSceneOpener(QWidget):
         self.openBtn.setEnabled(False)
         self.importBtn.setEnabled(False)
         self.detailPanel.clear()
-        self.selectedLabel.setText("スキャン中…")
 
+        # ルート未設定なら案内のみ表示してスキャンしない
+        if not self.root_path:
+            self.progressBar.hide()
+            self.statusLabel.setText("ルートフォルダが未設定です — [SET ROOT] から選択してください")
+            self.selectedLabel.setText("ルート未設定")
+            return
+
+        self.selectedLabel.setText("スキャン中…")
         self.progressBar.setRange(0, 0)
         self.progressBar.show()
-        self.statusLabel.setText(f"スキャン中: {ROOT_PATH}")
+        self.statusLabel.setText(f"スキャン中: {self.root_path}")
         self.refreshBtn.setEnabled(False)
 
         # スキャンは常に全 Maya ファイルを取得し、絞り込みは表示時(_filter)で行う。
         # （スキャン時に絞ると _all_items が偏り、タイプ切替で表示が消えるため）
-        self._scan_thread = ScanThread(ROOT_PATH, None)
+        self._scan_thread = ScanThread(self.root_path, None)
         self._scan_thread.found.connect(self._on_scan_done)
         self._scan_thread.finished_scan.connect(self._on_scan_finished)
         self._scan_thread.start()
@@ -753,14 +801,14 @@ class MayaSceneOpener(QWidget):
         self.progressBar.hide()
         self.refreshBtn.setEnabled(True)
         if count == 0:
-            if not ROOT_PATH.exists():
-                self.statusLabel.setText(f"⚠  パスが見つかりません: {ROOT_PATH}")
-                self.selectedLabel.setText(f"パスが存在しません")
+            if not self.root_path or not self.root_path.exists():
+                self.statusLabel.setText(f"⚠  パスが見つかりません: {self.root_path}")
+                self.selectedLabel.setText("パスが存在しません")
             else:
                 self.statusLabel.setText("Maya ファイルが見つかりませんでした")
                 self.selectedLabel.setText("ファイルなし")
         else:
-            self.statusLabel.setText(f"✓  {count} ファイルが見つかりました  |  {ROOT_PATH}")
+            self.statusLabel.setText(f"✓  {count} ファイルが見つかりました  |  {self.root_path}")
             self.selectedLabel.setText("ファイルを選択してください")
 
     def _populate_tree(self, items: list):
@@ -942,16 +990,19 @@ class MayaSceneOpener(QWidget):
 
 # ─── エントリーポイント ────────────────────────────────────────────────────────
 # 【使い方】
-#   このファイルを N:\projects\MDLM\source\wrk\scripts\ に保存し、
-#   Maya スクリプトエディタ（またはシェルフボタン）から下記を実行:
+#   1) このファイルを任意の "scripts" フォルダに maya_scene_opener.py として保存。
+#   2) Maya スクリプトエディタ（またはシェルフボタン）から下記を実行:
 #
 #       import sys
-#       SCRIPT_DIR = r"N:\projects\MDLM\source\wrk\scripts"
+#       SCRIPT_DIR = r"<scripts フォルダのパスをここに>"   # 例: C:/work/scripts
 #       if SCRIPT_DIR not in sys.path:
 #           sys.path.insert(0, SCRIPT_DIR)
 #       import importlib, maya_scene_opener
 #       importlib.reload(maya_scene_opener)
 #       maya_scene_opener.main()
+#
+#   3) 初回起動時にスキャンするルートフォルダを選択。設定は保存され次回以降は自動復元。
+#      （ツールバーの [SET ROOT] でいつでも変更可能）
 #
 # 【重要】QApplication は絶対に新規作成しない。
 #         Maya はすでに独自の QApplication を持っており、
