@@ -41,7 +41,7 @@ MAYA_EXTENSIONS = {".ma", ".mb"}
 
 STYLE = """
 /* ═══════════════════════════════════════════════
-   MDLM Pipeline Tool – Dark Industrial Theme
+   OG_Pipeline Tool – Dark Industrial Theme
 ═══════════════════════════════════════════════ */
 
 QMainWindow, QWidget {
@@ -535,7 +535,7 @@ class MayaSceneOpener(QWidget):
         super().__init__(parent)
         # Qt.Window フラグで独立ウィンドウとして表示（親が設定されていても）
         self.setWindowFlags(Qt.Window)
-        self.setWindowTitle("MDLM  Pipeline — Scene Opener")
+        self.setWindowTitle("OG_Pipeline — Scene Opener")
         self.setMinimumSize(1000, 680)
         self.resize(1200, 760)
 
@@ -614,7 +614,7 @@ class MayaSceneOpener(QWidget):
         # ロゴ + タイトル
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
-        app_title = QLabel("MDLM  PIPELINE")
+        app_title = QLabel("OG_PIPELINE")
         app_title.setObjectName("appTitle")
         subtitle = QLabel("MAYA SCENE OPENER  //  SHOT BROWSER")
         subtitle.setObjectName("appSubtitle")
@@ -990,13 +990,13 @@ class MayaSceneOpener(QWidget):
 
 # ─── エントリーポイント ────────────────────────────────────────────────────────
 # 【使い方】
-#   1) このファイルを任意の "scripts" フォルダに maya_scene_opener.py として保存。
+#   1) このファイルを Maya 標準の scripts フォルダに maya_scene_opener.py として保存。
+#        Windows : <ドキュメント>/maya/scripts/   または  /maya/<version>/scripts/
+#        macOS   : ~/Library/Preferences/Autodesk/maya/scripts/
+#      ※ このフォルダは Maya 起動時に自動で sys.path に入るため、パス指定は不要。
+#
 #   2) Maya スクリプトエディタ（またはシェルフボタン）から下記を実行:
 #
-#       import sys
-#       SCRIPT_DIR = r"<scripts フォルダのパスをここに>"   # 例: C:/work/scripts
-#       if SCRIPT_DIR not in sys.path:
-#           sys.path.insert(0, SCRIPT_DIR)
 #       import importlib, maya_scene_opener
 #       importlib.reload(maya_scene_opener)
 #       maya_scene_opener.main()
@@ -1030,7 +1030,7 @@ def main():
     既にウィンドウが開いている場合は前面に移動する（多重起動防止）。
     """
     if QApplication.instance() is None:
-        print("[MDLM Pipeline] エラー: Maya のスクリプトエディタから実行してください。")
+        print("[OG_Pipeline] エラー: Maya のスクリプトエディタから実行してください。")
         return None
 
     # 既存ウィンドウを探して前面に出す
