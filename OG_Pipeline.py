@@ -493,6 +493,10 @@ class ColumnBrowser(QWidget):
         super().__init__(parent)
         self.root = None
         self.ext_filter = None       # None / ".ma" / ".mb"
+        # 検索フィルタ: None なら通常ブラウズ。set のときはヒットにつながる
+        # フォルダ／ファイルだけをカラムに表示する。
+        self._allowed_files = None   # set[str] (normpath)
+        self._allowed_dirs = None    # set[str] (normpath)
         self._columns = []
         self._build_ui()
 
@@ -519,31 +523,30 @@ class ColumnBrowser(QWidget):
 
     # ── 公開 API ──────────────────────────────────────────────
     def set_root(self, path):
+        """通常ブラウズ（検索フィルタ解除）。"""
         self.root = Path(path) if path else None
+        self._allowed_files = None
+        self._allowed_dirs = None
         self.refresh()
 
     def set_ext_filter(self, ext):
         self.ext_filter = ext
         self.refresh()
 
+    def apply_search_filter(self, files, dirs):
+        """検索ヒット集合でカラムを絞り込む。表示形式は通常ドリルと同じ。
+
+        files / dirs は normpath 済みの絶対パス集合。
+        dirs にはヒットの祖先フォルダ（ルートまで）を含める。
+        """
+        self._allowed_files = files
+        self._allowed_dirs = dirs
+        self.refresh()
+
     def refresh(self):
         self._clear_columns()
         if self.root and self.root.exists():
             self._add_column(self.root)
-
-    def show_search_results(self, items):
-        """検索結果（[(rel, abs, size, mtime), ...]）を 1 カラムにフラット表示する。"""
-        self._clear_columns()
-        lw = self._make_column(f"検索結果  ({len(items)})", width=self.COL_WIDTH * 2)
-        for rel, abs_p, _size, _mtime in items:
-            it = QListWidgetItem(rel)
-            it.setData(Qt.UserRole, ("file", abs_p))
-            ext = Path(abs_p).suffix.lower()
-            it.setForeground(QColor("#e8a838" if ext == ".ma" else "#4a9eff"))
-            lw.addItem(it)
-        self.hbox.insertWidget(len(self._columns), lw._container)
-        self._columns.append(lw)
-        self._update_width()
 
     # ── 内部処理 ──────────────────────────────────────────────
     def _clear_columns(self):
@@ -580,16 +583,23 @@ class ColumnBrowser(QWidget):
 
     def _list_dir(self, dir_path):
         dirs, files = [], []
+        filtering = self._allowed_files is not None
         try:
             with os.scandir(str(dir_path)) as it:
                 for entry in it:
                     try:
+                        full = os.path.normpath(os.path.join(str(dir_path), entry.name))
                         if entry.is_dir():
+                            # 検索中は、ヒットへつながるフォルダだけを表示する
+                            if filtering and full not in self._allowed_dirs:
+                                continue
                             dirs.append(entry.name)
                         elif entry.is_file():
                             suf = Path(entry.name).suffix.lower()
                             if suf in MAYA_EXTENSIONS:
                                 if self.ext_filter and suf != self.ext_filter:
+                                    continue
+                                if filtering and full not in self._allowed_files:
                                     continue
                                 files.append(entry.name)
                     except Exception:
@@ -1013,6 +1023,8 @@ class OGPipelineWindow(QWidget):
             self.browser.set_root(self.active_root)
             self.statusLabel.setText(f"▸  {self.active_root}")
         else:
+            # 検索中もカラム表示を保つため、ルートを保持したまま結果でフィルタする
+            self.browser.root = Path(self.active_root)
             self._start_search(query, self.browser.ext_filter)
 
     def _start_search(self, query, ext):
@@ -1031,9 +1043,25 @@ class OGPipelineWindow(QWidget):
 
     def _on_search_found(self, results):
         q = self._pending_query
-        filtered = [r for r in results if q in r[0].lower()]
-        self.browser.show_search_results(filtered)
-        self.statusLabel.setText(f"検索: {len(filtered)} 件ヒット  |  {self.active_root}")
+        root_norm = os.path.normpath(str(self.active_root))
+        files, dirs = set(), set()
+        for rel, abs_p, _size, _mtime in results:
+            if q not in rel.lower():
+                continue
+            files.add(os.path.normpath(abs_p))
+            # ヒットの親フォルダからルートまでを「表示対象フォルダ」に積む
+            p = os.path.normpath(os.path.dirname(abs_p))
+            while True:
+                dirs.add(p)
+                if p == root_norm:
+                    break
+                parent = os.path.dirname(p)
+                if parent == p:
+                    break
+                p = parent
+        # 通常ドリルと同じカラム表示のまま、ヒットだけに絞り込む
+        self.browser.apply_search_filter(files, dirs)
+        self.statusLabel.setText(f"検索: {len(files)} 件ヒット  |  {self.active_root}")
 
     # ════════════════════════════════════════════════════════════════════
     #  選択
