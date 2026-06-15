@@ -487,7 +487,9 @@ class ColumnBrowser(QWidget):
     file_selected = Signal(object)   # 選択ファイル情報 dict、解除時は None
     file_activated = Signal(str)     # ダブルクリックで開く（絶対パス）
 
-    COL_WIDTH = 240
+    COL_WIDTH = 240        # 既定（最小）幅
+    COL_MIN_WIDTH = 200    # カラムの下限幅
+    COL_MAX_WIDTH = 640    # カラムの上限幅（これを超える場合はツールチップで全文表示）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -573,7 +575,13 @@ class ColumnBrowser(QWidget):
 
         lw = QListWidget()
         lw.setObjectName("browserColumn")
+        # フォントを明示設定し、幅計測(fontMetrics)と実描画を一致させる
+        f = QFont("Consolas")
+        f.setStyleHint(QFont.Monospace)
+        f.setPixelSize(12)
+        lw.setFont(f)
         lw.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        lw.setTextElideMode(Qt.ElideNone)   # 名前を「…」で省略しない
         lw.itemClicked.connect(lambda item, w=lw: self._on_clicked(w, item))
         lw.itemDoubleClicked.connect(lambda item, w=lw: self._on_double(w, item))
         v.addWidget(lw, 1)
@@ -620,6 +628,7 @@ class ColumnBrowser(QWidget):
             it = QListWidgetItem(f"📁  {name}")
             it.setData(Qt.UserRole, ("dir", str(Path(dir_path) / name)))
             it.setForeground(QColor("#cdb27a"))
+            it.setToolTip(name)
             lw.addItem(it)
         for name in files:
             p = Path(dir_path) / name
@@ -627,11 +636,31 @@ class ColumnBrowser(QWidget):
             it = QListWidgetItem(f"    {name}")
             it.setData(Qt.UserRole, ("file", str(p)))
             it.setForeground(QColor("#e8a838" if ext == ".ma" else "#4a9eff"))
+            it.setToolTip(name)
             lw.addItem(it)
+        # 中身（最長の名前）に合わせてカラム幅を決める → 長い名前が切れない。
+        self._fit_column(lw, title)
         # 末尾スペーサーの手前に挿入して、カラムを左詰めで右へ伸ばしていく。
         self.hbox.insertWidget(len(self._columns), lw._container)
         self._columns.append(lw)
         self._update_width()
+
+    def _fit_column(self, lw, title=""):
+        """カラム幅を最長項目（とヘッダー）に合わせる。上限を超えたらクランプ。"""
+        fm = lw.fontMetrics()
+
+        def text_w(s):
+            try:
+                return fm.horizontalAdvance(s)   # Qt 5.11+
+            except AttributeError:
+                return fm.boundingRect(s).width()
+
+        w = text_w(title)
+        for i in range(lw.count()):
+            w = max(w, text_w(lw.item(i).text()))
+        w += 40   # 左パディング・選択枠・スクロールバー等の余白
+        w = max(self.COL_MIN_WIDTH, min(int(w), self.COL_MAX_WIDTH))
+        lw._container.setFixedWidth(w)
 
     def _trim_after(self, lw):
         """lw より右のカラムをすべて取り除く。"""
