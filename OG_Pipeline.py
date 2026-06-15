@@ -901,6 +901,13 @@ class OGPipelineWindow(QWidget):
         self.selectedLabel.setStyleSheet("color: #2a3045; font-size: 11px;")
         ab_layout.addWidget(self.selectedLabel, 1)
 
+        # 現在開いているシーンを、そのシーンのフォルダを既定にして別名保存する
+        self.saveAsBtn = QPushButton("⤓  SAVE AS")
+        self.saveAsBtn.setObjectName("refreshBtn")
+        self.saveAsBtn.setToolTip("現在のシーンを、開いているシーンのフォルダを既定にして保存")
+        self.saveAsBtn.clicked.connect(self._save_scene_as)
+        ab_layout.addWidget(self.saveAsBtn)
+
         self.importBtn = QPushButton("▤  IMPORT")
         self.importBtn.setObjectName("importBtn")
         self.importBtn.setEnabled(False)
@@ -1133,12 +1140,14 @@ class OGPipelineWindow(QWidget):
                 if reply == QMessageBox.Cancel:
                     return
                 if reply == QMessageBox.Save:
-                    # 新規（未名）シーンは save できないため saveAs ダイアログを出す
+                    # 新規（未名）シーンは save できないため saveAs ダイアログを出す。
+                    # 既定フォルダは「これから開くシーンのフォルダ」にする。
                     if cmds.file(q=True, sceneName=True):
                         cmds.file(save=True)
                     else:
+                        start_dir = os.path.dirname(path)
                         save_path, _ = QFileDialog.getSaveFileName(
-                            self, "シーンを保存", "", "Maya Files (*.ma *.mb)"
+                            self, "シーンを保存", start_dir, "Maya Files (*.ma *.mb)"
                         )
                         if not save_path:
                             return
@@ -1176,6 +1185,53 @@ class OGPipelineWindow(QWidget):
                 QMessageBox.Ok,
             )
             self.statusLabel.setText(f"[Standalone]  import: {Path(path).name}")
+
+    def _save_scene_as(self):
+        """現在開いているシーンを、そのシーンのフォルダを既定にして別名保存する。
+
+        Maya のホットキー／プロジェクトは変更しない。ツール内の保存ダイアログだけ、
+        開いているシーンのフォルダを開始位置にする（Ctrl+Shift+S のツール版）。
+        """
+        try:
+            import maya.cmds as cmds
+        except ImportError:
+            QMessageBox.information(
+                self, "SAVE AS（スタンドアロンモード）",
+                "Maya 内で実行すると、現在のシーンのフォルダを既定にした\n"
+                "保存ダイアログ（fileDialog2）を表示します。",
+                QMessageBox.Ok,
+            )
+            return
+
+        # 開始フォルダの優先順位:
+        #   1) 現在開いているシーンのフォルダ
+        #   2) ツールで最後に選択したファイルのフォルダ
+        #   3) 現在のワークスペース
+        cur = cmds.file(q=True, sceneName=True)
+        start = ""
+        if cur:
+            start = os.path.dirname(cur)
+        elif self._selected_path:
+            start = os.path.dirname(self._selected_path)
+        if not start:
+            try:
+                start = cmds.workspace(q=True, dir=True)
+            except Exception:
+                start = ""
+
+        res = cmds.fileDialog2(
+            fileMode=0,                      # 保存（存在しないファイル名も可）
+            caption="Save Scene As",
+            startingDirectory=start,
+            fileFilter="Maya ASCII (*.ma);;Maya Binary (*.mb)",
+        )
+        if not res:
+            return
+        save_path = res[0]
+        ftype = "mayaAscii" if save_path.lower().endswith(".ma") else "mayaBinary"
+        cmds.file(rename=save_path)
+        cmds.file(save=True, type=ftype)
+        self.statusLabel.setText(f"✓  保存しました: {Path(save_path).name}")
 
 
 # ─── エントリーポイント ────────────────────────────────────────────────────────
