@@ -17,6 +17,7 @@ OG_Pipeline — Maya Scene Opener
 import os
 import sys
 import json
+import subprocess
 from pathlib import Path
 
 try:
@@ -195,6 +196,40 @@ def clear_startup_root():
     if "startup_root" in cfg:
         cfg.pop("startup_root", None)
         _write_config(cfg)
+
+
+def reveal_in_explorer(path):
+    """OS のファイラでパスを開く。ファイルなら選択状態で、フォルダならそのまま開く。
+
+    Playblast ツールの open_in_explorer と同じ方針でクロスプラットフォーム対応。
+    成否を bool で返す。
+    """
+    p = os.path.normpath(str(path))
+    is_file = os.path.isfile(p)
+    folder = p if os.path.isdir(p) else os.path.dirname(p)
+    # 存在するフォルダまで親を遡る
+    while folder and not os.path.isdir(folder):
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            folder = None
+            break
+        folder = parent
+    if not folder:
+        return False
+    try:
+        if sys.platform.startswith("win"):
+            if is_file:
+                subprocess.Popen('explorer /select,"{}"'.format(p))
+            else:
+                subprocess.Popen('explorer "{}"'.format(folder))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", p] if is_file else ["open", folder])
+        else:
+            subprocess.Popen(["xdg-open", folder])
+        return True
+    except Exception as e:
+        print("[OG_Pipeline] フォルダを開けませんでした:", e)
+        return False
 
 
 # ─── スタイル ────────────────────────────────────────────────────────────────
@@ -901,6 +936,14 @@ class OGPipelineWindow(QWidget):
         self.selectedLabel.setStyleSheet("color: #2a3045; font-size: 11px;")
         ab_layout.addWidget(self.selectedLabel, 1)
 
+        # 選択中のシーンのフォルダをエクスプローラー（OS のファイラ）で開く
+        self.openFolderBtn = QPushButton("📂  フォルダを開く")
+        self.openFolderBtn.setObjectName("refreshBtn")
+        self.openFolderBtn.setToolTip("選択中のシーンのフォルダをエクスプローラーで開く")
+        self.openFolderBtn.setEnabled(False)
+        self.openFolderBtn.clicked.connect(self._open_in_explorer)
+        ab_layout.addWidget(self.openFolderBtn)
+
         # 現在開いているシーンを、そのシーンのフォルダを既定にして別名保存する
         self.saveAsBtn = QPushButton("⤓  SAVE AS")
         self.saveAsBtn.setObjectName("refreshBtn")
@@ -1047,6 +1090,7 @@ class OGPipelineWindow(QWidget):
         self._selected_path = ""
         self.openBtn.setEnabled(False)
         self.importBtn.setEnabled(False)
+        self.openFolderBtn.setEnabled(False)
         self.detailPanel.clear()
         self.selectedLabel.setText("ファイルを選択してください")
 
@@ -1107,12 +1151,14 @@ class OGPipelineWindow(QWidget):
             self._selected_path = ""
             self.openBtn.setEnabled(False)
             self.importBtn.setEnabled(False)
+            self.openFolderBtn.setEnabled(False)
             self.selectedLabel.setText("ファイルを選択してください")
             self.detailPanel.clear()
             return
         self._selected_path = info["abs"]
         self.openBtn.setEnabled(True)
         self.importBtn.setEnabled(True)
+        self.openFolderBtn.setEnabled(True)
         self.selectedLabel.setText(f"選択: {Path(info['abs']).name}")
         self.detailPanel.update_info(info["rel"], info["abs"], info["size"], info["mtime"])
 
@@ -1185,6 +1231,17 @@ class OGPipelineWindow(QWidget):
                 QMessageBox.Ok,
             )
             self.statusLabel.setText(f"[Standalone]  import: {Path(path).name}")
+
+    def _open_in_explorer(self):
+        """選択中のシーンのフォルダを OS のファイラで開く（ファイルを選択状態にする）。"""
+        if not self._selected_path:
+            return
+        if reveal_in_explorer(self._selected_path):
+            self.statusLabel.setText(
+                f"📂  フォルダを開きました: {Path(self._selected_path).parent}"
+            )
+        else:
+            self.statusLabel.setText("⚠  フォルダを開けませんでした")
 
     def _save_scene_as(self):
         """現在開いているシーンを、そのシーンのフォルダを既定にして別名保存する。
