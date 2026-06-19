@@ -53,8 +53,10 @@ DEFAULT_STAGES = [
     {"code": "anm_sec", "label": "Anim / Secondary"},
 ]
 
-# sh<digits>d<digits>_<stage>[_<version>]
-SHOT_RE = re.compile(r"^(sh\d+d\d+)_(.+?)(?:_v?(\d+))?$", re.IGNORECASE)
+# sh<digits>d<digits>_<stage>[_<version>] を名前のどこからでも拾う。
+# 先頭にプレフィックスが付く（例: EP01_sh010d00_lay_pri）場合も match させるため search で使う。
+# stage は lay_pri / lay_anm / anm_sec のような「英字_英字」トークン。
+SHOT_RE = re.compile(r"(sh\d+d\d+)_([a-z]{2,6}_[a-z]{2,6})(?:_v?(\d+))?", re.IGNORECASE)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -126,7 +128,7 @@ def load_project_roots():
 def parse_scene_name(filename):
     """ファイル名から {'shot','stage','version'} を返す。該当しなければ None。"""
     stem = Path(filename).stem
-    m = SHOT_RE.match(stem)
+    m = SHOT_RE.search(stem)
     if not m:
         return None
     return {
@@ -142,18 +144,26 @@ def scan_shots(root, stage_order):
     戻り値:
         shots: {shot: {stage: {'version','path','mtime'}}}
         stages_seen: 出現した工程コードの順序付きリスト（既知→未知）
+        stats: {'total','matched','samples'} 診断用
     """
     shots = {}
     seen = set()
+    total = 0
+    matched = 0
+    samples = []           # 命名規則に一致しなかったファイル名の例
     root = Path(root)
     if not root.exists():
-        return shots, list(stage_order)
+        return shots, list(stage_order), {"total": 0, "matched": 0, "samples": []}
     for path in root.rglob("*"):
         if path.suffix.lower() not in MAYA_EXTENSIONS:
             continue
+        total += 1
         info = parse_scene_name(path.name)
         if not info:
+            if len(samples) < 5:
+                samples.append(path.name)
             continue
+        matched += 1
         try:
             mtime = path.stat().st_mtime
         except Exception:
@@ -170,7 +180,8 @@ def scan_shots(root, stage_order):
     # 既知の工程順 → そのあとに未知の工程
     ordered = [s for s in stage_order if s in seen]
     ordered += sorted(s for s in seen if s not in stage_order)
-    return shots, ordered
+    stats = {"total": total, "matched": matched, "samples": samples}
+    return shots, ordered, stats
 
 
 def current_stage(shot_stages, stage_order):
@@ -261,7 +272,7 @@ class SheetSync:
 #  バックグラウンド・スキャン
 # ═══════════════════════════════════════════════════════════════════════════════
 class ScanWorker(QThread):
-    done = Signal(object, object)   # (shots, stage_order)
+    done = Signal(object, object, object)   # (shots, stage_order, stats)
     failed = Signal(str)
 
     def __init__(self, root, stage_order):
@@ -271,8 +282,8 @@ class ScanWorker(QThread):
 
     def run(self):
         try:
-            shots, ordered = scan_shots(self.root, self.stage_order)
-            self.done.emit(shots, ordered)
+            shots, ordered, stats = scan_shots(self.root, self.stage_order)
+            self.done.emit(shots, ordered, stats)
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -437,12 +448,30 @@ class OGStageTracker(QWidget):
         self.scanBtn.setEnabled(True)
         self.status.setText(f"⚠  スキャン失敗: {msg}")
 
-    def _on_scan_done(self, shots, ordered):
+    def _on_scan_done(self, shots, ordered, stats):
         self.scanBtn.setEnabled(True)
         self._shots = shots
         self._ordered_stages = ordered or list(self.stage_order)
         self._populate_table()
-        self.status.setText(f"✓  {len(shots)} ショット  /  工程: {', '.join(self._ordered_stages)}")
+
+        total = stats.get("total", 0)
+        matched = stats.get("matched", 0)
+        if not shots:
+            if total == 0:
+                self.status.setText(
+                    "⚠  このルート配下に Maya ファイル(.ma/.mb)が見つかりませんでした"
+                )
+            else:
+                ex = "  /  例: " + ", ".join(stats.get("samples", [])[:3]) if stats.get("samples") else ""
+                self.status.setText(
+                    f"⚠  Maya {total} 件中、命名規則(sh###d00_工程)に一致 0 件。"
+                    f"このプロジェクトの命名が違う可能性があります{ex}"
+                )
+        else:
+            self.status.setText(
+                f"✓  {len(shots)} ショット  |  Maya {total} 件中 {matched} 件一致  "
+                f"|  工程: {', '.join(self._ordered_stages)}"
+            )
 
     def _populate_table(self):
         cols = ["Shot"] + self._ordered_stages + ["Current", "Render"]
