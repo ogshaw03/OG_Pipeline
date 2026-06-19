@@ -171,7 +171,8 @@ def scan_shots(root, stage_order):
         seen.add(info["stage"])
         entry = shots.setdefault(info["shot"], {})
         cur = entry.get(info["stage"])
-        if cur is None or info["version"] >= cur["version"]:
+        # 同じショット×工程に複数ある場合は「最新の更新日時」のものを採用する
+        if cur is None or mtime >= cur["mtime"]:
             entry[info["stage"]] = {
                 "version": info["version"],
                 "path": str(path),
@@ -494,7 +495,13 @@ class OGStageTracker(QWidget):
                 if cell:
                     item = QTableWidgetItem(f"v{cell['version']:03d}")
                     item.setForeground(QColor("#3dcfb8"))
-                    item.setToolTip(cell["path"])
+                    # 採用した「最新更新日時」のファイルのパスと日時をツールチップに
+                    import datetime
+                    try:
+                        mstr = datetime.datetime.fromtimestamp(cell["mtime"]).strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        mstr = "-"
+                    item.setToolTip(f"{cell['path']}\n更新: {mstr}（最新更新日時を採用）")
                     item.setData(Qt.UserRole, cell["path"])
                     if s == cur:
                         f = QFont(); f.setBold(True); item.setFont(f)
