@@ -37,7 +37,8 @@ try:
     from PySide2.QtWidgets import (
         QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
         QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
-        QFileDialog, QLineEdit, QDialog, QFormLayout, QDialogButtonBox, QAbstractItemView
+        QFileDialog, QLineEdit, QDialog, QFormLayout, QDialogButtonBox, QAbstractItemView,
+        QInputDialog
     )
 except ImportError:
     from PySide6.QtCore import Qt, QThread, Signal
@@ -45,7 +46,8 @@ except ImportError:
     from PySide6.QtWidgets import (
         QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
         QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
-        QFileDialog, QLineEdit, QDialog, QFormLayout, QDialogButtonBox, QAbstractItemView
+        QFileDialog, QLineEdit, QDialog, QFormLayout, QDialogButtonBox, QAbstractItemView,
+        QInputDialog
     )
 
 MAYA_EXTENSIONS = {".ma", ".mb"}
@@ -633,6 +635,12 @@ class OGStageTracker(QWidget):
         self.rootCombo = QComboBox()
         bar.addWidget(self.rootCombo)
 
+        # スタンドアロンでも使えるよう、ルートフォルダを直接追加できる
+        self.addRootBtn = QPushButton("＋  ルート追加")
+        self.addRootBtn.setToolTip("スキャンするルートフォルダを選んで登録")
+        self.addRootBtn.clicked.connect(self._add_root)
+        bar.addWidget(self.addRootBtn)
+
         self.scanBtn = QPushButton("↻  SCAN")
         self.scanBtn.clicked.connect(self._scan_now)
         bar.addWidget(self.scanBtn)
@@ -670,7 +678,12 @@ class OGStageTracker(QWidget):
 
     def _reload_roots(self):
         self.rootCombo.clear()
-        roots = load_project_roots()
+        # OG_Pipeline 登録ルート ＋ このツールで追加したローカルルートを統合
+        roots = list(load_project_roots())
+        names = {r["name"] for r in roots}
+        for r in self.settings.get("local_roots", []):
+            if isinstance(r, dict) and r.get("name") and r["name"] not in names:
+                roots.append(r)
         for r in roots:
             self.rootCombo.addItem(r["name"], r["path"])
         last = self.settings.get("last_root")
@@ -680,8 +693,39 @@ class OGStageTracker(QWidget):
                 self.rootCombo.setCurrentIndex(i)
         if self.rootCombo.count() == 0:
             self.status.setText(
-                "プロジェクトルート未登録 — まず OG_Pipeline でルートを登録してください"
+                "プロジェクトルート未登録 — [＋ ルート追加] でフォルダを登録してください"
             )
+
+    def _add_root(self):
+        """ルートフォルダを選んで登録する（スタンドアロンでも使える）。"""
+        folder = QFileDialog.getExistingDirectory(
+            self, "スキャンするルートフォルダを選択", str(Path.home())
+        )
+        if not folder:
+            return
+        default = Path(folder).name or folder
+        name, ok = QInputDialog.getText(
+            self, "プロジェクト名", "このルートの名前:", text=default
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        # 可能なら OG_Pipeline の roots.json に保存（両ツールで共有）。
+        # 失敗時はこのツール側の設定にローカル保存する。
+        try:
+            import OG_Pipeline
+            OG_Pipeline.add_root(name, folder)
+        except Exception:
+            locals_ = [r for r in self.settings.get("local_roots", [])
+                       if not (isinstance(r, dict) and r.get("name") == name)]
+            locals_.append({"name": name, "path": folder})
+            self.settings["local_roots"] = locals_
+            save_settings(self.settings)
+        self._reload_roots()
+        i = self.rootCombo.findText(name)
+        if i >= 0:
+            self.rootCombo.setCurrentIndex(i)
+        self.status.setText(f"✓  ルートを追加: {name}")
 
     def _active_root(self):
         i = self.rootCombo.currentIndex()
