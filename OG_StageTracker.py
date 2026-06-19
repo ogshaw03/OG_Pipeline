@@ -7,6 +7,7 @@ OG_Pipeline とは独立したツール。命名規則からショットと工�
 命名規則（既定）:
     sh###d00_lay_pri  → 工程 lay_pri
     sh###d00_lay_anm  → 工程 lay_anm
+    sh###d00_anm_pri  → 工程 anm_pri
     sh###d00_anm_sec  → 工程 anm_sec
   すなわち  sh<番号>d<番号>_<工程>[_<バージョン>]  の形。
   工程の定義は設定ファイルで追加・変更できる。
@@ -50,6 +51,7 @@ MAYA_EXTENSIONS = {".ma", ".mb"}
 DEFAULT_STAGES = [
     {"code": "lay_pri", "label": "Layout / Primary"},
     {"code": "lay_anm", "label": "Layout / Anim"},
+    {"code": "anm_pri", "label": "Anim / Primary"},
     {"code": "anm_sec", "label": "Anim / Secondary"},
 ]
 
