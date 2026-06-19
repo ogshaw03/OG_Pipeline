@@ -7,9 +7,10 @@ OG_Pipeline とは独立したツール。命名規則からショットと工�
 命名規則（既定）:
     sh###d00_lay_pri  → 工程 lay_pri
     sh###d00_lay_anm  → 工程 lay_anm
-    sh###d00_anm_pri  → 工程 anm_pri
     sh###d00_anm_sec  → 工程 anm_sec
   すなわち  sh<番号>d<番号>_<工程>[_<バージョン>]  の形。
+  ※ 同じショット×工程に複数ある場合や打ち間違いデータがある場合は、
+    更新日時が最新のファイルを参照する。
   工程の定義は設定ファイルで追加・変更できる。
 
 設定ファイル（OG_Pipeline と同じ og_pipeline フォルダ内）:
@@ -48,10 +49,11 @@ except ImportError:
 MAYA_EXTENSIONS = {".ma", ".mb"}
 
 # 工程の既定定義（コード, 表示名）。順序がパイプライン進行順。
+# ※ anm_pri はファイル名の打ち間違いデータのため、正規工程には含めない。
+#   万一ファイルが存在しても「現工程」は更新日時が最新の工程で判定するので参照されない。
 DEFAULT_STAGES = [
     {"code": "lay_pri", "label": "Layout / Primary"},
     {"code": "lay_anm", "label": "Layout / Anim"},
-    {"code": "anm_pri", "label": "Anim / Primary"},
     {"code": "anm_sec", "label": "Anim / Secondary"},
 ]
 
@@ -187,16 +189,26 @@ def scan_shots(root, stage_order):
     return shots, ordered, stats
 
 
-def current_stage(shot_stages, stage_order):
-    """そのショットで最も進んだ（存在する）工程コードを返す。無ければ None。"""
-    cur = None
-    for s in stage_order:
-        if s in shot_stages:
-            cur = s
-    if cur is None:  # 既知順に無ければ、出現した中の最後
-        keys = list(shot_stages.keys())
-        cur = keys[-1] if keys else None
-    return cur
+def current_stage(shot_stages, stage_order=None):
+    """そのショットの「現工程」を返す。無ければ None。
+
+    更新日時が最新のファイルを持つ工程を現工程とする。
+    （打ち間違いデータ等、古いファイルの工程を現工程にしないため、
+      パイプライン順ではなく更新日時を優先する）
+    更新日時が同じ場合はパイプライン順で後ろの工程を優先する。
+    """
+    order = stage_order or []
+    best, best_m = None, None
+    for code, cell in shot_stages.items():
+        m = cell.get("mtime", 0.0) if isinstance(cell, dict) else 0.0
+        if best is None or m > best_m:
+            best, best_m = code, m
+        elif m == best_m and order:
+            bi = order.index(best) if best in order else -1
+            ci = order.index(code) if code in order else -1
+            if ci > bi:
+                best = code
+    return best
 
 
 def build_table_rows(shots, stage_order):
