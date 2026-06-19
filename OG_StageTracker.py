@@ -27,6 +27,7 @@ Maya 内でも Maya 外（通常の Python）でも起動できる。Sheets 連�
 import os
 import re
 import sys
+import csv
 import json
 import subprocess
 from pathlib import Path
@@ -647,7 +648,19 @@ class OGStageTracker(QWidget):
 
         bar.addStretch()
 
+        # かんたん連携（認証・API不要）
+        self.copyBtn = QPushButton("📋  表をコピー")
+        self.copyBtn.setToolTip("表をコピーして、スプレッドシートに貼り付け(Ctrl+V)できます（設定不要）")
+        self.copyBtn.clicked.connect(self._copy_to_clipboard)
+        bar.addWidget(self.copyBtn)
+
+        self.csvBtn = QPushButton("⇩  CSV")
+        self.csvBtn.setToolTip("CSV に書き出し（Excel やスプレッドシートのインポートで開ける・設定不要）")
+        self.csvBtn.clicked.connect(self._export_csv)
+        bar.addWidget(self.csvBtn)
+
         self.pushBtn = QPushButton("⭱  PUSH → Sheets")
+        self.pushBtn.setToolTip("Google Sheets に直接書き出し（要・初期設定）")
         self.pushBtn.clicked.connect(self._push_sheets)
         bar.addWidget(self.pushBtn)
 
@@ -868,7 +881,45 @@ class OGStageTracker(QWidget):
             save_settings(self.settings)
             self.status.setText("✓  設定を保存しました")
 
-    # ── Google Sheets ────────────────────────────────────
+    # ── かんたん連携（認証・API不要） ───────────────────────
+    def _copy_to_clipboard(self):
+        """表を TSV でクリップボードへ。スプレッドシートにそのまま貼り付け(Ctrl+V)できる。"""
+        if not self._shots:
+            self.status.setText("先に SCAN を実行してください")
+            return
+        header, rows = build_table_rows(self._shots, self._ordered_stages)
+        lines = ["\t".join(header)]
+        lines += ["\t".join(str(c) for c in r) for r in rows]
+        QApplication.clipboard().setText("\n".join(lines))
+        self.status.setText(
+            f"📋  {len(rows)} 行をコピーしました — スプレッドシートのセルを選んで Ctrl+V で貼り付け"
+        )
+
+    def _export_csv(self):
+        """CSV に書き出す。スプレッドシートの[ファイル>インポート]や Excel で開ける。"""
+        if not self._shots:
+            self.status.setText("先に SCAN を実行してください")
+            return
+        header, rows = build_table_rows(self._shots, self._ordered_stages)
+        fp, _ = QFileDialog.getSaveFileName(
+            self, "CSV を保存", str(Path.home() / "stage_tracker.csv"), "CSV (*.csv)"
+        )
+        if not fp:
+            return
+        if not fp.lower().endswith(".csv"):
+            fp += ".csv"
+        try:
+            # utf-8-sig で Excel でも日本語が文字化けしない
+            with open(fp, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(header)
+                w.writerows(rows)
+        except Exception as e:
+            QMessageBox.warning(self, "CSV 書き出し失敗", str(e))
+            return
+        self.status.setText(f"✓  CSV を書き出しました: {fp}")
+
+    # ── Google Sheets（直接連携・要設定） ──────────────────
     def _sync(self):
         return SheetSync(
             self.settings.get("sheet_id", ""),
