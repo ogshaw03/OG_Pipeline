@@ -1,0 +1,571 @@
+"""
+OG_StageTracker — ショット工程トラッカー（Google Sheets 連携）
+
+OG_Pipeline とは独立したツール。命名規則からショットと工程を判定し、
+ショット×工程の表として一覧・管理する。Google Sheets と同期できる。
+
+命名規則（既定）:
+    sh###d00_lay_pri  → 工程 lay_pri
+    sh###d00_lay_anm  → 工程 lay_anm
+    sh###d00_anm_sec  → 工程 anm_sec
+  すなわち  sh<番号>d<番号>_<工程>[_<バージョン>]  の形。
+  工程の定義は設定ファイルで追加・変更できる。
+
+設定ファイル（OG_Pipeline と同じ og_pipeline フォルダ内）:
+    stage_tracker.json … シート ID / 認証 JSON パス / 工程定義 / 最後に使ったルート
+
+Google Sheets 連携には gspread と google-auth が必要:
+    pip install gspread google-auth
+サービスアカウントの JSON 鍵を発行し、対象シートをそのアカウントに共有しておく。
+
+Maya 内でも Maya 外（通常の Python）でも起動できる。Sheets 連携は外部実行が手軽。
+"""
+
+import os
+import re
+import sys
+import json
+from pathlib import Path
+
+try:
+    from PySide2.QtCore import Qt, QThread, Signal
+    from PySide2.QtGui import QColor, QFont
+    from PySide2.QtWidgets import (
+        QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+        QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
+        QFileDialog, QLineEdit, QDialog, QFormLayout, QDialogButtonBox, QAbstractItemView
+    )
+except ImportError:
+    from PySide6.QtCore import Qt, QThread, Signal
+    from PySide6.QtGui import QColor, QFont
+    from PySide6.QtWidgets import (
+        QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+        QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
+        QFileDialog, QLineEdit, QDialog, QFormLayout, QDialogButtonBox, QAbstractItemView
+    )
+
+MAYA_EXTENSIONS = {".ma", ".mb"}
+
+# 工程の既定定義（コード, 表示名）。順序がパイプライン進行順。
+DEFAULT_STAGES = [
+    {"code": "lay_pri", "label": "Layout / Primary"},
+    {"code": "lay_anm", "label": "Layout / Anim"},
+    {"code": "anm_sec", "label": "Anim / Secondary"},
+]
+
+# sh<digits>d<digits>_<stage>[_<version>]
+SHOT_RE = re.compile(r"^(sh\d+d\d+)_(.+?)(?:_v?(\d+))?$", re.IGNORECASE)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  設定（JSON）
+# ═══════════════════════════════════════════════════════════════════════════════
+def get_config_dir():
+    """OG_Pipeline と同じ設定フォルダを使う（無ければホーム配下に作成）。"""
+    try:
+        import OG_Pipeline
+        return OG_Pipeline.get_config_dir()
+    except Exception:
+        base = os.path.expanduser("~")
+        d = os.path.join(base, "og_pipeline")
+        if not os.path.isdir(d):
+            try:
+                os.makedirs(d)
+            except Exception:
+                pass
+        return d
+
+
+def _config_path():
+    return os.path.join(get_config_dir(), "stage_tracker.json")
+
+
+def load_settings():
+    try:
+        with open(_config_path(), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_settings(data):
+    try:
+        with open(_config_path(), "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("[OG_StageTracker] 設定保存エラー:", e)
+
+
+def get_stages():
+    """工程定義を返す（設定で上書き可能、無ければ既定）。"""
+    stages = load_settings().get("stages")
+    if isinstance(stages, list) and stages:
+        out = []
+        for s in stages:
+            if isinstance(s, dict) and s.get("code"):
+                out.append({"code": str(s["code"]).lower(),
+                            "label": str(s.get("label", s["code"]))})
+        if out:
+            return out
+    return list(DEFAULT_STAGES)
+
+
+def load_project_roots():
+    """OG_Pipeline に登録済みのルート一覧を再利用する。"""
+    try:
+        import OG_Pipeline
+        return OG_Pipeline.load_roots()
+    except Exception:
+        return []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  命名パース／集計（UI 非依存・単体テスト可能）
+# ═══════════════════════════════════════════════════════════════════════════════
+def parse_scene_name(filename):
+    """ファイル名から {'shot','stage','version'} を返す。該当しなければ None。"""
+    stem = Path(filename).stem
+    m = SHOT_RE.match(stem)
+    if not m:
+        return None
+    return {
+        "shot": m.group(1).lower(),
+        "stage": m.group(2).lower(),
+        "version": int(m.group(3)) if m.group(3) else 0,
+    }
+
+
+def scan_shots(root, stage_order):
+    """ルート配下を走査し、ショット×工程の最新版テーブルを構築する。
+
+    戻り値:
+        shots: {shot: {stage: {'version','path','mtime'}}}
+        stages_seen: 出現した工程コードの順序付きリスト（既知→未知）
+    """
+    shots = {}
+    seen = set()
+    root = Path(root)
+    if not root.exists():
+        return shots, list(stage_order)
+    for path in root.rglob("*"):
+        if path.suffix.lower() not in MAYA_EXTENSIONS:
+            continue
+        info = parse_scene_name(path.name)
+        if not info:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except Exception:
+            mtime = 0.0
+        seen.add(info["stage"])
+        entry = shots.setdefault(info["shot"], {})
+        cur = entry.get(info["stage"])
+        if cur is None or info["version"] >= cur["version"]:
+            entry[info["stage"]] = {
+                "version": info["version"],
+                "path": str(path),
+                "mtime": mtime,
+            }
+    # 既知の工程順 → そのあとに未知の工程
+    ordered = [s for s in stage_order if s in seen]
+    ordered += sorted(s for s in seen if s not in stage_order)
+    return shots, ordered
+
+
+def current_stage(shot_stages, stage_order):
+    """そのショットで最も進んだ（存在する）工程コードを返す。無ければ None。"""
+    cur = None
+    for s in stage_order:
+        if s in shot_stages:
+            cur = s
+    if cur is None:  # 既知順に無ければ、出現した中の最後
+        keys = list(shot_stages.keys())
+        cur = keys[-1] if keys else None
+    return cur
+
+
+def build_table_rows(shots, stage_order):
+    """Google Sheets / 表示用の行データを作る。
+
+    header: ["Shot", <各工程>, "Current", "Render"]
+    各工程セルは最新バージョン文字列（無ければ ""）。
+    """
+    header = ["Shot"] + list(stage_order) + ["Current", "Render"]
+    rows = []
+    for shot in sorted(shots.keys()):
+        st = shots[shot]
+        row = [shot]
+        for s in stage_order:
+            row.append(f"v{st[s]['version']:03d}" if s in st else "")
+        row.append(current_stage(st, stage_order) or "")
+        row.append("")  # Render 状態（Sheets/Deadline 側で埋める想定）
+        rows.append(row)
+    return header, rows
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Google Sheets 連携（gspread）
+# ═══════════════════════════════════════════════════════════════════════════════
+class SheetSync:
+    def __init__(self, sheet_id, worksheet, cred_path):
+        self.sheet_id = sheet_id
+        self.worksheet = worksheet or "Sheet1"
+        self.cred_path = cred_path
+
+    def _open(self):
+        try:
+            import gspread
+        except ImportError:
+            raise RuntimeError(
+                "gspread が見つかりません。`pip install gspread google-auth` を実行してください。"
+            )
+        if not self.sheet_id:
+            raise RuntimeError("シート ID が未設定です。")
+        if not self.cred_path or not os.path.isfile(self.cred_path):
+            raise RuntimeError("サービスアカウント JSON のパスが正しくありません。")
+        try:
+            from google.oauth2.service_account import Credentials
+            scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+            creds = Credentials.from_service_account_file(self.cred_path, scopes=scopes)
+            gc = gspread.authorize(creds)
+        except Exception:
+            gc = gspread.service_account(filename=self.cred_path)
+        return gc.open_by_key(self.sheet_id)
+
+    def push(self, header, rows):
+        """ヘッダー＋行を worksheet に書き出す（全置換）。戻り値: 書き込み行数。"""
+        sh = self._open()
+        try:
+            ws = sh.worksheet(self.worksheet)
+        except Exception:
+            ws = sh.add_worksheet(title=self.worksheet,
+                                  rows=max(100, len(rows) + 10),
+                                  cols=max(20, len(header) + 2))
+        ws.clear()
+        data = [header] + rows
+        try:
+            ws.update(range_name="A1", values=data)   # 新しめの gspread
+        except TypeError:
+            ws.update("A1", data)                     # 旧 gspread 互換
+        return len(rows)
+
+    def pull_records(self):
+        """worksheet を辞書のリストで取得（Render 列の取り込みなどに使用）。"""
+        sh = self._open()
+        ws = sh.worksheet(self.worksheet)
+        return ws.get_all_records()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  バックグラウンド・スキャン
+# ═══════════════════════════════════════════════════════════════════════════════
+class ScanWorker(QThread):
+    done = Signal(object, object)   # (shots, stage_order)
+    failed = Signal(str)
+
+    def __init__(self, root, stage_order):
+        super().__init__()
+        self.root = root
+        self.stage_order = stage_order
+
+    def run(self):
+        try:
+            shots, ordered = scan_shots(self.root, self.stage_order)
+            self.done.emit(shots, ordered)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Google Sheets 設定ダイアログ
+# ═══════════════════════════════════════════════════════════════════════════════
+class SheetSettingsDialog(QDialog):
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Google Sheets 設定")
+        self.setMinimumWidth(480)
+        form = QFormLayout(self)
+
+        self.sheetId = QLineEdit(settings.get("sheet_id", ""))
+        self.sheetId.setPlaceholderText("スプレッドシート URL の /d/ と /edit の間の ID")
+        form.addRow("シート ID:", self.sheetId)
+
+        self.worksheet = QLineEdit(settings.get("worksheet", "Sheet1"))
+        form.addRow("ワークシート名:", self.worksheet)
+
+        cred_row = QHBoxLayout()
+        self.cred = QLineEdit(settings.get("cred_path", ""))
+        self.cred.setPlaceholderText("サービスアカウントの JSON 鍵ファイル")
+        browse = QPushButton("参照…")
+        browse.clicked.connect(self._browse)
+        cred_row.addWidget(self.cred, 1)
+        cred_row.addWidget(browse)
+        form.addRow("認証 JSON:", cred_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _browse(self):
+        fp, _ = QFileDialog.getOpenFileName(
+            self, "サービスアカウント JSON を選択", str(Path.home()), "JSON Files (*.json)"
+        )
+        if fp:
+            self.cred.setText(fp)
+
+    def values(self):
+        return {
+            "sheet_id": self.sheetId.text().strip(),
+            "worksheet": self.worksheet.text().strip() or "Sheet1",
+            "cred_path": self.cred.text().strip(),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  メインウィンドウ
+# ═══════════════════════════════════════════════════════════════════════════════
+STYLE = """
+QWidget { background:#0f1117; color:#c8ccd4; font-family:"Consolas",monospace; font-size:12px; }
+QPushButton { background:#1a1f2e; color:#c8ccd4; border:1px solid #2a3045; border-radius:3px; padding:6px 14px; }
+QPushButton:hover { border-color:#4a9eff; color:#4a9eff; }
+QComboBox { background:#1a1f2e; border:1px solid #2a3045; border-radius:3px; padding:4px 8px; min-width:220px; }
+QTableWidget { background:#0f1117; gridline-color:#1e2435; border:none; }
+QHeaderView::section { background:#141824; color:#e8a838; border:none; border-right:1px solid #1e2435; padding:6px 8px; }
+QTableWidget::item:selected { background:#2a2010; color:#e8a838; }
+QLineEdit { background:#1a1f2e; border:1px solid #2a3045; border-radius:3px; padding:5px 8px; }
+"""
+
+
+class OGStageTracker(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.Window)
+        self.setWindowTitle("OG_StageTracker — Shot / Stage")
+        self.setMinimumSize(900, 560)
+        self.resize(1100, 680)
+
+        self.settings = load_settings()
+        self.stages = get_stages()
+        self.stage_order = [s["code"] for s in self.stages]
+        self.stage_labels = {s["code"]: s["label"] for s in self.stages}
+        self._shots = {}
+        self._ordered_stages = list(self.stage_order)
+        self._scan = None
+
+        self.setStyleSheet(STYLE)
+        self._build_ui()
+        self._reload_roots()
+
+    # ── UI ──────────────────────────────────────────────
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("PROJECT:"))
+        self.rootCombo = QComboBox()
+        bar.addWidget(self.rootCombo)
+
+        self.scanBtn = QPushButton("↻  SCAN")
+        self.scanBtn.clicked.connect(self._scan_now)
+        bar.addWidget(self.scanBtn)
+
+        bar.addStretch()
+
+        self.pushBtn = QPushButton("⭱  PUSH → Sheets")
+        self.pushBtn.clicked.connect(self._push_sheets)
+        bar.addWidget(self.pushBtn)
+
+        self.pullBtn = QPushButton("⭳  PULL Render")
+        self.pullBtn.setToolTip("Google Sheets の Render 列を取り込んで表示")
+        self.pullBtn.clicked.connect(self._pull_render)
+        bar.addWidget(self.pullBtn)
+
+        self.cfgBtn = QPushButton("⚙  Sheets 設定")
+        self.cfgBtn.clicked.connect(self._edit_settings)
+        bar.addWidget(self.cfgBtn)
+        root.addLayout(bar)
+
+        self.table = QTableWidget()
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.cellDoubleClicked.connect(self._on_cell_double)
+        root.addWidget(self.table, 1)
+
+        self.status = QLabel("準備完了")
+        self.status.setStyleSheet("color:#3a4055;")
+        root.addWidget(self.status)
+
+    def _reload_roots(self):
+        self.rootCombo.clear()
+        roots = load_project_roots()
+        for r in roots:
+            self.rootCombo.addItem(r["name"], r["path"])
+        last = self.settings.get("last_root")
+        if last:
+            i = self.rootCombo.findText(last)
+            if i >= 0:
+                self.rootCombo.setCurrentIndex(i)
+        if self.rootCombo.count() == 0:
+            self.status.setText(
+                "プロジェクトルート未登録 — まず OG_Pipeline でルートを登録してください"
+            )
+
+    def _active_root(self):
+        i = self.rootCombo.currentIndex()
+        return self.rootCombo.itemData(i) if i >= 0 else None
+
+    # ── スキャン ──────────────────────────────────────────
+    def _scan_now(self):
+        root = self._active_root()
+        if not root:
+            self.status.setText("ルートが選択されていません")
+            return
+        self.settings["last_root"] = self.rootCombo.currentText()
+        save_settings(self.settings)
+        self.scanBtn.setEnabled(False)
+        self.status.setText(f"スキャン中: {root}")
+        self._scan = ScanWorker(root, self.stage_order)
+        self._scan.done.connect(self._on_scan_done)
+        self._scan.failed.connect(self._on_scan_failed)
+        self._scan.start()
+
+    def _on_scan_failed(self, msg):
+        self.scanBtn.setEnabled(True)
+        self.status.setText(f"⚠  スキャン失敗: {msg}")
+
+    def _on_scan_done(self, shots, ordered):
+        self.scanBtn.setEnabled(True)
+        self._shots = shots
+        self._ordered_stages = ordered or list(self.stage_order)
+        self._populate_table()
+        self.status.setText(f"✓  {len(shots)} ショット  /  工程: {', '.join(self._ordered_stages)}")
+
+    def _populate_table(self):
+        cols = ["Shot"] + self._ordered_stages + ["Current", "Render"]
+        self.table.clear()
+        self.table.setColumnCount(len(cols))
+        labels = ["Shot"] + [self.stage_labels.get(s, s) for s in self._ordered_stages] + ["Current", "Render"]
+        self.table.setHorizontalHeaderLabels(labels)
+        self.table.setRowCount(len(self._shots))
+
+        for r, shot in enumerate(sorted(self._shots.keys())):
+            st = self._shots[shot]
+            cur = current_stage(st, self._ordered_stages)
+
+            it = QTableWidgetItem(shot)
+            it.setForeground(QColor("#e8c87a"))
+            self.table.setItem(r, 0, it)
+
+            for c, s in enumerate(self._ordered_stages, start=1):
+                cell = st.get(s)
+                if cell:
+                    item = QTableWidgetItem(f"v{cell['version']:03d}")
+                    item.setForeground(QColor("#3dcfb8"))
+                    item.setToolTip(cell["path"])
+                    item.setData(Qt.UserRole, cell["path"])
+                    if s == cur:
+                        f = QFont(); f.setBold(True); item.setFont(f)
+                        item.setForeground(QColor("#e8a838"))
+                else:
+                    item = QTableWidgetItem("")
+                self.table.setItem(r, c, item)
+
+            cur_item = QTableWidgetItem(cur or "")
+            cur_item.setForeground(QColor("#e8a838"))
+            self.table.setItem(r, len(self._ordered_stages) + 1, cur_item)
+
+            self.table.setItem(r, len(self._ordered_stages) + 2, QTableWidgetItem(""))
+
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+
+    def _on_cell_double(self, row, col):
+        item = self.table.item(row, col)
+        path = item.data(Qt.UserRole) if item else None
+        if not path:
+            return
+        try:
+            import OG_Pipeline
+            OG_Pipeline.reveal_in_explorer(path)
+        except Exception:
+            pass
+
+    # ── Google Sheets ────────────────────────────────────
+    def _edit_settings(self):
+        dlg = SheetSettingsDialog(self.settings, self)
+        if dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec():
+            self.settings.update(dlg.values())
+            save_settings(self.settings)
+            self.status.setText("✓  Sheets 設定を保存しました")
+
+    def _sync(self):
+        return SheetSync(
+            self.settings.get("sheet_id", ""),
+            self.settings.get("worksheet", "Sheet1"),
+            self.settings.get("cred_path", ""),
+        )
+
+    def _push_sheets(self):
+        if not self._shots:
+            self.status.setText("先に SCAN を実行してください")
+            return
+        header, rows = build_table_rows(self._shots, self._ordered_stages)
+        try:
+            n = self._sync().push(header, rows)
+        except Exception as e:
+            QMessageBox.warning(self, "Sheets へ書き出し失敗", str(e))
+            return
+        self.status.setText(f"✓  Google Sheets に {n} 行を書き出しました")
+
+    def _pull_render(self):
+        """シートの Render 列（Shot をキー）を取り込んで表に反映する。"""
+        try:
+            records = self._sync().pull_records()
+        except Exception as e:
+            QMessageBox.warning(self, "Sheets 取り込み失敗", str(e))
+            return
+        render_by_shot = {}
+        for rec in records:
+            shot = str(rec.get("Shot", "")).lower()
+            if shot:
+                render_by_shot[shot] = str(rec.get("Render", ""))
+        col = self._ordered_stages and (len(self._ordered_stages) + 2)
+        for r in range(self.table.rowCount()):
+            shot_item = self.table.item(r, 0)
+            if not shot_item:
+                continue
+            val = render_by_shot.get(shot_item.text().lower(), "")
+            item = QTableWidgetItem(val)
+            if val:
+                low = val.lower()
+                if "rend" in low or "active" in low:
+                    item.setForeground(QColor("#e8a838"))   # レンダ中
+                elif "done" in low or "complete" in low:
+                    item.setForeground(QColor("#3dcfb8"))   # 完了
+                elif "fail" in low or "error" in low:
+                    item.setForeground(QColor("#ff6b6b"))   # 失敗
+            self.table.setItem(r, col, item)
+        self.status.setText("✓  Render 状態を取り込みました")
+
+
+def main():
+    app = QApplication.instance()
+    if app is None:
+        # Maya 内では既存の QApplication を使う。スタンドアロンでは新規作成。
+        app = QApplication(sys.argv)
+        win = OGStageTracker()
+        win.show()
+        sys.exit(app.exec_() if hasattr(app, "exec_") else app.exec())
+    win = OGStageTracker()
+    win.show()
+    win.raise_()
+    win.activateWindow()
+    return win
+
+
+if __name__ == "__main__":
+    main()
