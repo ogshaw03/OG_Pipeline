@@ -16,6 +16,7 @@ OG_Pipeline — Maya Scene Opener
 
 import os
 import sys
+import re
 import json
 import subprocess
 from pathlib import Path
@@ -951,6 +952,13 @@ class OGPipelineWindow(QWidget):
         self.saveAsBtn.clicked.connect(self._save_scene_as)
         ab_layout.addWidget(self.saveAsBtn)
 
+        # 名前末尾の番号を +1 してローカルバージョンを上げて保存
+        self.versionUpBtn = QPushButton("⇧  VERSION UP")
+        self.versionUpBtn.setObjectName("refreshBtn")
+        self.versionUpBtn.setToolTip("ファイル名末尾の番号を +1 して同じフォルダに保存")
+        self.versionUpBtn.clicked.connect(self._version_up_save)
+        ab_layout.addWidget(self.versionUpBtn)
+
         self.importBtn = QPushButton("▤  IMPORT")
         self.importBtn.setObjectName("importBtn")
         self.importBtn.setEnabled(False)
@@ -1231,6 +1239,68 @@ class OGPipelineWindow(QWidget):
                 QMessageBox.Ok,
             )
             self.statusLabel.setText(f"[Standalone]  import: {Path(path).name}")
+
+    @staticmethod
+    def _next_version_path(path):
+        """ファイル名末尾の数字グループを +1 した、未使用のパスを返す。
+
+        例: An_Emy08_atk01_001.ma -> An_Emy08_atk01_002.ma
+        既に存在する番号はスキップし、空いている次の番号まで進める。
+        ゼロ埋め桁数は維持する。数字が無ければ None。
+        """
+        p = Path(path)
+        stem, ext = p.stem, p.suffix
+        last = None
+        for last in re.finditer(r"\d+", stem):
+            pass  # 末尾の数字グループを採用
+        if last is None:
+            return None
+        start, end = last.start(), last.end()
+        width = len(last.group())
+        n = int(last.group()) + 1
+        folder = p.parent
+        while True:
+            new_stem = stem[:start] + str(n).zfill(width) + stem[end:]
+            candidate = folder / (new_stem + ext)
+            if not candidate.exists():
+                return str(candidate)
+            n += 1
+
+    def _version_up_save(self):
+        """現在のシーンの名前末尾番号を +1 して、同じフォルダにローカルバージョン保存。"""
+        try:
+            import maya.cmds as cmds
+        except ImportError:
+            base = self._selected_path or ""
+            nxt = self._next_version_path(base) if base else None
+            QMessageBox.information(
+                self, "VERSION UP（スタンドアロンモード）",
+                ("Maya 内で実行すると、現在のシーンを次のバージョンで保存します。\n\n"
+                 f"プレビュー:\n{base or '(未選択)'}\n  → {nxt or '(番号なし)'}"),
+                QMessageBox.Ok,
+            )
+            return
+
+        cur = cmds.file(q=True, sceneName=True)
+        if not cur:
+            QMessageBox.warning(
+                self, "VERSION UP",
+                "保存済みのシーンがありません。先に名前を付けて保存してください。",
+            )
+            return
+        new_path = self._next_version_path(cur)
+        if not new_path:
+            QMessageBox.warning(
+                self, "VERSION UP",
+                f"ファイル名に番号が見つかりませんでした:\n{Path(cur).name}",
+            )
+            return
+        ftype = "mayaAscii" if new_path.lower().endswith(".ma") else "mayaBinary"
+        cmds.file(rename=new_path)
+        cmds.file(save=True, type=ftype)
+        self.statusLabel.setText(f"✓  バージョンアップ保存: {Path(new_path).name}")
+        # 現在のルート配下なら一覧を更新して新バージョンを反映
+        self._apply_view()
 
     def _open_in_explorer(self):
         """選択中のシーンのフォルダを OS のファイラで開く（ファイルを選択状態にする）。"""
