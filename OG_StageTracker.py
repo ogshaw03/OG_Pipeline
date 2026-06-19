@@ -1,8 +1,9 @@
 """
-OG_StageTracker — ショット工程トラッカー（Google Sheets 連携）
+OG_StageTracker — ショット工程トラッカー（Deadline レンダ状態連携）
 
 OG_Pipeline とは独立したツール。命名規則からショットと工程を判定し、
-ショット×工程の表として一覧・管理する。Google Sheets と同期できる。
+ショット×工程の表として一覧・管理する。Deadline からレンダ状態を取得して
+Render 列に表示できる。
 
 命名規則（既定）:
     sh###d00_lay_pri  → 工程 lay_pri
@@ -15,19 +16,18 @@ OG_Pipeline とは独立したツール。命名規則からショットと工�
   工程の定義は設定ファイルで追加・変更できる。
 
 設定ファイル（OG_Pipeline と同じ og_pipeline フォルダ内）:
-    stage_tracker.json … シート ID / 認証 JSON パス / 工程定義 / 最後に使ったルート
+    stage_tracker.json … Deadline 接続設定 / 工程定義 / ルート / 最後に使ったルート
 
-Google Sheets 連携には gspread と google-auth が必要:
-    pip install gspread google-auth
-サービスアカウントの JSON 鍵を発行し、対象シートをそのアカウントに共有しておく。
+Deadline 連携:
+    方式 webservice（RCS の REST）または cli（deadlinecommand）。
+    ジョブ名に sh###d00 を含めると、自動でカットに紐付く。
 
-Maya 内でも Maya 外（通常の Python）でも起動できる。Sheets 連携は外部実行が手軽。
+Maya 内でも Maya 外（通常の Python）でも起動できる。
 """
 
 import os
 import re
 import sys
-import csv
 import json
 import subprocess
 from pathlib import Path
@@ -219,86 +219,15 @@ def current_stage(shot_stages, stage_order=None):
     return best
 
 
-def build_table_rows(shots, stage_order):
-    """Google Sheets / 表示用の行データを作る。
-
-    header: ["Shot", <各工程>, "Current", "Render"]
-    各工程セルは最新バージョン文字列（無ければ ""）。
-    """
-    header = ["Shot"] + list(stage_order) + ["Current", "Render"]
-    rows = []
-    for shot in sorted(shots.keys()):
-        st = shots[shot]
-        row = [shot]
-        for s in stage_order:
-            row.append(f"v{st[s]['version']:03d}" if s in st else "")
-        row.append(current_stage(st, stage_order) or "")
-        row.append("")  # Render 状態（Sheets/Deadline 側で埋める想定）
-        rows.append(row)
-    return header, rows
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Google Sheets 連携（gspread）
-# ═══════════════════════════════════════════════════════════════════════════════
-class SheetSync:
-    def __init__(self, sheet_id, worksheet, cred_path):
-        self.sheet_id = sheet_id
-        self.worksheet = worksheet or "Sheet1"
-        self.cred_path = cred_path
-
-    def _open(self):
-        try:
-            import gspread
-        except ImportError:
-            raise RuntimeError(
-                "gspread が見つかりません。`pip install gspread google-auth` を実行してください。"
-            )
-        if not self.sheet_id:
-            raise RuntimeError("シート ID が未設定です。")
-        if not self.cred_path or not os.path.isfile(self.cred_path):
-            raise RuntimeError("サービスアカウント JSON のパスが正しくありません。")
-        try:
-            from google.oauth2.service_account import Credentials
-            scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-            creds = Credentials.from_service_account_file(self.cred_path, scopes=scopes)
-            gc = gspread.authorize(creds)
-        except Exception:
-            gc = gspread.service_account(filename=self.cred_path)
-        return gc.open_by_key(self.sheet_id)
-
-    def push(self, header, rows):
-        """ヘッダー＋行を worksheet に書き出す（全置換）。戻り値: 書き込み行数。"""
-        sh = self._open()
-        try:
-            ws = sh.worksheet(self.worksheet)
-        except Exception:
-            ws = sh.add_worksheet(title=self.worksheet,
-                                  rows=max(100, len(rows) + 10),
-                                  cols=max(20, len(header) + 2))
-        ws.clear()
-        data = [header] + rows
-        try:
-            ws.update(range_name="A1", values=data)   # 新しめの gspread
-        except TypeError:
-            ws.update("A1", data)                     # 旧 gspread 互換
-        return len(rows)
-
-    def pull_records(self):
-        """worksheet を辞書のリストで取得（Render 列の取り込みなどに使用）。"""
-        sh = self._open()
-        ws = sh.worksheet(self.worksheet)
-        return ws.get_all_records()
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Deadline 連携（Web Service REST / deadlinecommand CLI）
 # ═══════════════════════════════════════════════════════════════════════════════
 # 表示用の状態優先度（上ほど優先して表示＝「今レンダ中」を前面に出す）
-RENDER_PRIORITY = ["Rendering", "Queued", "Pending", "Failed", "Suspended", "Completed", "Unknown"]
+RENDER_PRIORITY = ["Rendering", "Active", "Queued", "Pending", "Failed", "Suspended", "Completed", "Unknown"]
 
 # Deadline の Stat 整数 → ラベル（環境差があるためチャンク数も併用して判定する）
-_STAT_LABELS = {1: "Queued", 2: "Suspended", 3: "Completed", 4: "Failed",
+# Stat=1 は「Active」（＝レンダ中 or 待機）。チャンク数/マシン数で Rendering を切り分ける。
+_STAT_LABELS = {1: "Active", 2: "Suspended", 3: "Completed", 4: "Failed",
                 5: "Pending", 6: "Pending"}
 
 
@@ -309,35 +238,60 @@ def _shot_of_jobname(name):
 
 
 def _job_status_from_rest(job):
-    """REST のジョブ辞書から {name, status, progress} を作る（チャンク数優先）。"""
+    """REST のジョブ辞書から {name, status, progress} を作る。
+
+    「レンダ中」の判定はフィールド名が環境で異なるため、複数候補を見る:
+      - 実行中タスク数: RenderingChunks / RenderingTasks
+      - 実行中マシン: Mach / MachineName / RenderingMachineNames（非空ならレンダ中）
+    これらが取れない Active ジョブは "Active"（実行中）として扱い、"Queued" と区別する。
+    """
     props = job.get("Props", {}) if isinstance(job, dict) else {}
     name = props.get("Name") or job.get("Name") or job.get("JobName") or ""
 
-    def ci(key):
-        try:
-            return int(job.get(key, 0) or 0)
-        except Exception:
-            return 0
+    def ci(*keys):
+        for k in keys:
+            if k in job:
+                try:
+                    return int(job.get(k) or 0)
+                except Exception:
+                    pass
+        return 0
 
-    rc, cc, qc = ci("RenderingChunks"), ci("CompletedChunks"), ci("QueuedChunks")
-    fc, pc, sc = ci("FailedChunks"), ci("PendingChunks"), ci("SuspendedChunks")
+    rc = ci("RenderingChunks", "RenderingTasks")
+    cc = ci("CompletedChunks", "CompletedTasks")
+    qc = ci("QueuedChunks", "QueuedTasks")
+    fc = ci("FailedChunks", "FailedTasks")
+    pc = ci("PendingChunks", "PendingTasks")
+    sc = ci("SuspendedChunks", "SuspendedTasks")
     total = rc + cc + qc + fc + pc + sc
     progress = (cc / total * 100.0) if total else 0.0
 
-    if rc > 0:
-        status = "Rendering"
+    machines = (job.get("Mach") or job.get("MachineName")
+                or job.get("RenderingMachineNames") or job.get("RenderingMachines") or [])
+    has_machine = bool(machines) if isinstance(machines, (list, tuple)) else bool(str(machines).strip())
+
+    stat = job.get("Stat")
+    active = (stat == 1)  # Deadline: Active
+
+    if rc > 0 or has_machine:
+        status = "Rendering"           # 実際にタスクが回っている
     elif total > 0 and cc == total:
         status = "Completed"
     elif fc > 0 and qc == 0 and rc == 0 and pc == 0:
         status = "Failed"
-    elif qc > 0:
-        status = "Queued"
+    elif sc > 0 and qc == 0 and pc == 0 and not active:
+        status = "Suspended"
+    elif qc > 0 and not active:
+        status = "Queued"              # 待機（Active でない＝まだ実行開始前ではない）
+    elif active:
+        # Active だが実行タスク/マシンが取得できない → 「実行中」扱い（Queue と区別）
+        status = "Active"
     elif pc > 0:
         status = "Pending"
-    elif sc > 0:
-        status = "Suspended"
+    elif qc > 0:
+        status = "Queued"
     else:
-        status = _STAT_LABELS.get(job.get("Stat"), "Unknown")
+        status = _STAT_LABELS.get(stat, "Unknown")
     return {"name": name, "status": status, "progress": progress}
 
 
@@ -345,7 +299,11 @@ def _normalize_cli_status(raw):
     s = str(raw).strip().lower()
     if "render" in s:
         return "Rendering"
-    if "queue" in s or "active" in s:
+    # Deadline のジョブ状態 "Active" は「実行中(レンダ中 or 待機)」。
+    # Queued とは別物なので "Active" として扱う（キュー誤表示を防ぐ）。
+    if "active" in s:
+        return "Active"
+    if "queue" in s:
         return "Queued"
     if "pend" in s:
         return "Pending"
@@ -515,28 +473,10 @@ class ScanWorker(QThread):
 class SettingsDialog(QDialog):
     def __init__(self, settings, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("設定 — Google Sheets / Deadline")
+        self.setWindowTitle("設定 — Deadline")
         self.setMinimumWidth(520)
         form = QFormLayout(self)
 
-        form.addRow(QLabel("■ Google Sheets"))
-        self.sheetId = QLineEdit(settings.get("sheet_id", ""))
-        self.sheetId.setPlaceholderText("スプレッドシート URL の /d/ と /edit の間の ID")
-        form.addRow("シート ID:", self.sheetId)
-
-        self.worksheet = QLineEdit(settings.get("worksheet", "Sheet1"))
-        form.addRow("ワークシート名:", self.worksheet)
-
-        cred_row = QHBoxLayout()
-        self.cred = QLineEdit(settings.get("cred_path", ""))
-        self.cred.setPlaceholderText("サービスアカウントの JSON 鍵ファイル")
-        browse = QPushButton("参照…")
-        browse.clicked.connect(self._browse)
-        cred_row.addWidget(self.cred, 1)
-        cred_row.addWidget(browse)
-        form.addRow("認証 JSON:", cred_row)
-
-        form.addRow(QLabel(""))
         form.addRow(QLabel("■ Deadline"))
         self.dlMode = QComboBox()
         self.dlMode.addItems(["webservice", "cli"])
@@ -566,13 +506,6 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
 
-    def _browse(self):
-        fp, _ = QFileDialog.getOpenFileName(
-            self, "サービスアカウント JSON を選択", str(Path.home()), "JSON Files (*.json)"
-        )
-        if fp:
-            self.cred.setText(fp)
-
     def _browse_cmd(self):
         fp, _ = QFileDialog.getOpenFileName(self, "deadlinecommand を選択", str(Path.home()))
         if fp:
@@ -580,9 +513,6 @@ class SettingsDialog(QDialog):
 
     def values(self):
         return {
-            "sheet_id": self.sheetId.text().strip(),
-            "worksheet": self.worksheet.text().strip() or "Sheet1",
-            "cred_path": self.cred.text().strip(),
             "deadline_mode": self.dlMode.currentText(),
             "deadline_host": self.dlHost.text().strip(),
             "deadline_port": self.dlPort.text().strip() or "8082",
@@ -647,27 +577,6 @@ class OGStageTracker(QWidget):
         bar.addWidget(self.scanBtn)
 
         bar.addStretch()
-
-        # かんたん連携（認証・API不要）
-        self.copyBtn = QPushButton("📋  表をコピー")
-        self.copyBtn.setToolTip("表をコピーして、スプレッドシートに貼り付け(Ctrl+V)できます（設定不要）")
-        self.copyBtn.clicked.connect(self._copy_to_clipboard)
-        bar.addWidget(self.copyBtn)
-
-        self.csvBtn = QPushButton("⇩  CSV")
-        self.csvBtn.setToolTip("CSV に書き出し（Excel やスプレッドシートのインポートで開ける・設定不要）")
-        self.csvBtn.clicked.connect(self._export_csv)
-        bar.addWidget(self.csvBtn)
-
-        self.pushBtn = QPushButton("⭱  PUSH → Sheets")
-        self.pushBtn.setToolTip("Google Sheets に直接書き出し（要・初期設定）")
-        self.pushBtn.clicked.connect(self._push_sheets)
-        bar.addWidget(self.pushBtn)
-
-        self.pullBtn = QPushButton("⭳  PULL Render")
-        self.pullBtn.setToolTip("Google Sheets の Render 列を取り込んで表示")
-        self.pullBtn.clicked.connect(self._pull_render)
-        bar.addWidget(self.pullBtn)
 
         self.deadlineBtn = QPushButton("⟳  Deadline")
         self.deadlineBtn.setToolTip("Deadline からレンダ状態を取得して Render 列に反映")
@@ -853,7 +762,9 @@ class OGStageTracker(QWidget):
         low = str(text).lower()
         if "rend" in low:
             return QColor("#e8a838")      # レンダ中
-        if "queue" in low or "active" in low or "pend" in low:
+        if "active" in low:
+            return QColor("#ffd060")      # 実行中（レンダ中の可能性）
+        if "queue" in low or "pend" in low:
             return QColor("#4a9eff")      # 待機/キュー
         if "fail" in low or "error" in low:
             return QColor("#ff6b6b")      # 失敗
@@ -880,83 +791,6 @@ class OGStageTracker(QWidget):
             self.settings.update(dlg.values())
             save_settings(self.settings)
             self.status.setText("✓  設定を保存しました")
-
-    # ── かんたん連携（認証・API不要） ───────────────────────
-    def _copy_to_clipboard(self):
-        """表を TSV でクリップボードへ。スプレッドシートにそのまま貼り付け(Ctrl+V)できる。"""
-        if not self._shots:
-            self.status.setText("先に SCAN を実行してください")
-            return
-        header, rows = build_table_rows(self._shots, self._ordered_stages)
-        lines = ["\t".join(header)]
-        lines += ["\t".join(str(c) for c in r) for r in rows]
-        QApplication.clipboard().setText("\n".join(lines))
-        self.status.setText(
-            f"📋  {len(rows)} 行をコピーしました — スプレッドシートのセルを選んで Ctrl+V で貼り付け"
-        )
-
-    def _export_csv(self):
-        """CSV に書き出す。スプレッドシートの[ファイル>インポート]や Excel で開ける。"""
-        if not self._shots:
-            self.status.setText("先に SCAN を実行してください")
-            return
-        header, rows = build_table_rows(self._shots, self._ordered_stages)
-        fp, _ = QFileDialog.getSaveFileName(
-            self, "CSV を保存", str(Path.home() / "stage_tracker.csv"), "CSV (*.csv)"
-        )
-        if not fp:
-            return
-        if not fp.lower().endswith(".csv"):
-            fp += ".csv"
-        try:
-            # utf-8-sig で Excel でも日本語が文字化けしない
-            with open(fp, "w", newline="", encoding="utf-8-sig") as f:
-                w = csv.writer(f)
-                w.writerow(header)
-                w.writerows(rows)
-        except Exception as e:
-            QMessageBox.warning(self, "CSV 書き出し失敗", str(e))
-            return
-        self.status.setText(f"✓  CSV を書き出しました: {fp}")
-
-    # ── Google Sheets（直接連携・要設定） ──────────────────
-    def _sync(self):
-        return SheetSync(
-            self.settings.get("sheet_id", ""),
-            self.settings.get("worksheet", "Sheet1"),
-            self.settings.get("cred_path", ""),
-        )
-
-    def _push_sheets(self):
-        if not self._shots:
-            self.status.setText("先に SCAN を実行してください")
-            return
-        header, rows = build_table_rows(self._shots, self._ordered_stages)
-        try:
-            n = self._sync().push(header, rows)
-        except Exception as e:
-            QMessageBox.warning(self, "Sheets へ書き出し失敗", str(e))
-            return
-        self.status.setText(f"✓  Google Sheets に {n} 行を書き出しました")
-
-    def _pull_render(self):
-        """シートの Render 列（Shot をキー）を取り込んで表に反映する。"""
-        try:
-            records = self._sync().pull_records()
-        except Exception as e:
-            QMessageBox.warning(self, "Sheets 取り込み失敗", str(e))
-            return
-        render_by_shot = {}
-        for rec in records:
-            shot = str(rec.get("Shot", "")).lower()
-            if shot:
-                render_by_shot[shot] = str(rec.get("Render", ""))
-        for r in range(self.table.rowCount()):
-            shot = self._shot_at_row(r)
-            if shot is None:
-                continue
-            self._set_render_cell(r, render_by_shot.get(shot, ""))
-        self.status.setText("✓  Render 状態を取り込みました")
 
     # ── Deadline ─────────────────────────────────────────
     def _fetch_deadline(self):
@@ -991,6 +825,7 @@ class OGStageTracker(QWidget):
     def _on_deadline_done(self, by_shot):
         self.deadlineBtn.setEnabled(True)
         rendering = 0
+        active = 0
         for r in range(self.table.rowCount()):
             shot = self._shot_at_row(r)
             rec = by_shot.get(shot) if shot else None
@@ -1000,13 +835,18 @@ class OGStageTracker(QWidget):
             status = rec.get("status", "")
             prog = rec.get("progress", 0.0)
             text = status
-            if status == "Rendering":
-                rendering += 1
+            if status in ("Rendering", "Active"):
+                if status == "Rendering":
+                    rendering += 1
+                else:
+                    active += 1
                 if prog:
-                    text = f"Rendering {prog:.0f}%"
+                    text = f"{status} {prog:.0f}%"
             self._set_render_cell(r, text)
+        extra = f"（実行中 {active}）" if active else ""
         self.status.setText(
-            f"✓  Deadline 反映: レンダ中 {rendering} カット / {len(by_shot)} カットにジョブあり"
+            f"✓  Deadline 反映: レンダ中 {rendering} カット{extra} / "
+            f"{len(by_shot)} カットにジョブあり"
         )
 
 
