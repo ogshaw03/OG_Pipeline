@@ -9,6 +9,7 @@ OG_Pipeline とは独立したツール。命名規則からショットと工�
     sh###d00_lay_anm  → 工程 lay_anm
     sh###d00_anm_sec  → 工程 anm_sec
   すなわち  sh<番号>d<番号>_<工程>[_<バージョン>]  の形。
+  ショットIDは sh### と shFS###（例 sh010d00 / shFS010d00）の両形式に対応。
   ※ 同じショット×工程に複数ある場合や打ち間違いデータがある場合は、
     更新日時が最新のファイルを参照する。
   工程の定義は設定ファイルで追加・変更できる。
@@ -59,9 +60,12 @@ DEFAULT_STAGES = [
 ]
 
 # sh<digits>d<digits>_<stage>[_<version>] を名前のどこからでも拾う。
+# ショットIDは sh### と shFS###（例 sh010d00 / shFS010d00）の両形式に対応。
 # 先頭にプレフィックスが付く（例: EP01_sh010d00_lay_pri）場合も match させるため search で使う。
 # stage は lay_pri / lay_anm / anm_sec のような「英字_英字」トークン。
-SHOT_RE = re.compile(r"(sh\d+d\d+)_([a-z]{2,6}_[a-z]{2,6})(?:_v?(\d+))?", re.IGNORECASE)
+SHOT_RE = re.compile(
+    r"(sh(?:fs)?\d+d\d+)_([a-z]{2,6}_[a-z]{2,6})(?:_v?(\d+))?", re.IGNORECASE
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -296,8 +300,8 @@ _STAT_LABELS = {1: "Queued", 2: "Suspended", 3: "Completed", 4: "Failed",
 
 
 def _shot_of_jobname(name):
-    """ジョブ名から sh###d00 を抽出してショット ID にする。無ければ None。"""
-    m = re.search(r"sh\d+d\d+", str(name), re.IGNORECASE)
+    """ジョブ名から sh###d00 / shFS###d00 を抽出してショット ID にする。無ければ None。"""
+    m = re.search(r"sh(?:fs)?\d+d\d+", str(name), re.IGNORECASE)
     return m.group(0).lower() if m else None
 
 
