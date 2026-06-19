@@ -27,6 +27,7 @@ import os
 import re
 import sys
 import json
+import subprocess
 from pathlib import Path
 
 try:
@@ -284,6 +285,204 @@ class SheetSync:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Deadline 連携（Web Service REST / deadlinecommand CLI）
+# ═══════════════════════════════════════════════════════════════════════════════
+# 表示用の状態優先度（上ほど優先して表示＝「今レンダ中」を前面に出す）
+RENDER_PRIORITY = ["Rendering", "Queued", "Pending", "Failed", "Suspended", "Completed", "Unknown"]
+
+# Deadline の Stat 整数 → ラベル（環境差があるためチャンク数も併用して判定する）
+_STAT_LABELS = {1: "Queued", 2: "Suspended", 3: "Completed", 4: "Failed",
+                5: "Pending", 6: "Pending"}
+
+
+def _shot_of_jobname(name):
+    """ジョブ名から sh###d00 を抽出してショット ID にする。無ければ None。"""
+    m = re.search(r"sh\d+d\d+", str(name), re.IGNORECASE)
+    return m.group(0).lower() if m else None
+
+
+def _job_status_from_rest(job):
+    """REST のジョブ辞書から {name, status, progress} を作る（チャンク数優先）。"""
+    props = job.get("Props", {}) if isinstance(job, dict) else {}
+    name = props.get("Name") or job.get("Name") or job.get("JobName") or ""
+
+    def ci(key):
+        try:
+            return int(job.get(key, 0) or 0)
+        except Exception:
+            return 0
+
+    rc, cc, qc = ci("RenderingChunks"), ci("CompletedChunks"), ci("QueuedChunks")
+    fc, pc, sc = ci("FailedChunks"), ci("PendingChunks"), ci("SuspendedChunks")
+    total = rc + cc + qc + fc + pc + sc
+    progress = (cc / total * 100.0) if total else 0.0
+
+    if rc > 0:
+        status = "Rendering"
+    elif total > 0 and cc == total:
+        status = "Completed"
+    elif fc > 0 and qc == 0 and rc == 0 and pc == 0:
+        status = "Failed"
+    elif qc > 0:
+        status = "Queued"
+    elif pc > 0:
+        status = "Pending"
+    elif sc > 0:
+        status = "Suspended"
+    else:
+        status = _STAT_LABELS.get(job.get("Stat"), "Unknown")
+    return {"name": name, "status": status, "progress": progress}
+
+
+def _normalize_cli_status(raw):
+    s = str(raw).strip().lower()
+    if "render" in s:
+        return "Rendering"
+    if "queue" in s or "active" in s:
+        return "Queued"
+    if "pend" in s:
+        return "Pending"
+    if "fail" in s:
+        return "Failed"
+    if "suspend" in s:
+        return "Suspended"
+    if "complete" in s or "done" in s:
+        return "Completed"
+    return "Unknown"
+
+
+class DeadlineClient:
+    """Deadline からジョブ状態を取得する。mode='webservice' か 'cli'。"""
+
+    def __init__(self, mode="webservice", host="", port="8082", cmd_path=""):
+        self.mode = mode or "webservice"
+        self.host = host
+        self.port = str(port or "8082")
+        self.cmd_path = cmd_path
+
+    def get_jobs(self):
+        """[{name, status, progress}, ...] を返す。"""
+        if self.mode == "cli":
+            return self._jobs_via_cli()
+        return self._jobs_via_webservice()
+
+    # --- Web Service (REST) ---
+    def _jobs_via_webservice(self):
+        import urllib.request
+        if not self.host:
+            raise RuntimeError("Deadline Web Service のホストが未設定です。")
+        url = "http://{}:{}/api/jobs".format(self.host, self.port)
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception as e:
+            raise RuntimeError("Deadline Web Service へ接続できません: {}".format(e))
+        if isinstance(data, dict):
+            data = data.get("Jobs") or data.get("jobs") or []
+        return [_job_status_from_rest(j) for j in data if isinstance(j, dict)]
+
+    # --- deadlinecommand (CLI) ---
+    def _resolve_cmd(self):
+        if self.cmd_path and os.path.isfile(self.cmd_path):
+            return self.cmd_path
+        exe = "deadlinecommand.exe" if sys.platform.startswith("win") else "deadlinecommand"
+        base = os.environ.get("DEADLINE_PATH", "")
+        if base:
+            cand = os.path.join(base, exe)
+            if os.path.isfile(cand):
+                return cand
+        return exe  # PATH に通っている前提
+
+    def _jobs_via_cli(self):
+        cmd = self._resolve_cmd()
+        try:
+            out = subprocess.check_output([cmd, "-GetJobs"],
+                                          stderr=subprocess.STDOUT, timeout=30)
+            out = out.decode("utf-8", "replace")
+        except Exception as e:
+            raise RuntimeError("deadlinecommand の実行に失敗しました: {}".format(e))
+        return self._parse_cli_jobs(out)
+
+    @staticmethod
+    def _parse_cli_jobs(text):
+        """deadlinecommand -GetJobs 出力を防御的にパースする（環境差に強く）。"""
+        jobs = []
+        cur = {}
+
+        def flush():
+            if cur:
+                name = cur.get("name") or cur.get("jobname") or ""
+                if name:
+                    jobs.append({
+                        "name": name,
+                        "status": _normalize_cli_status(cur.get("status")
+                                                        or cur.get("jobstatus") or ""),
+                        "progress": _to_float(cur.get("progress")
+                                              or cur.get("taskprogress") or 0),
+                    })
+
+        for line in text.splitlines():
+            if "=" not in line:
+                if line.strip() == "":
+                    flush()
+                    cur = {}
+                continue
+            key, val = line.split("=", 1)
+            k = key.strip().lower().replace(" ", "")
+            # 新しいジョブの開始（id 行）が来たら前のジョブを確定
+            if k in ("jobid", "id") and cur:
+                flush()
+                cur = {}
+            cur[k] = val.strip()
+        flush()
+        return jobs
+
+
+def _to_float(v):
+    try:
+        return float(str(v).replace("%", "").strip())
+    except Exception:
+        return 0.0
+
+
+def deadline_status_by_shot(jobs):
+    """ジョブ一覧をショット ID 単位に集約し、最も注目すべき状態を返す。
+
+    戻り値: {shot: {'status','progress','jobs'}}
+    """
+    by_shot = {}
+    for job in jobs:
+        shot = _shot_of_jobname(job.get("name", ""))
+        if not shot:
+            continue
+        rec = by_shot.setdefault(shot, {"status": "Unknown", "progress": 0.0, "jobs": 0})
+        rec["jobs"] += 1
+        # 優先度の高い（=レンダ中寄りの）状態を採用
+        cur_i = RENDER_PRIORITY.index(rec["status"]) if rec["status"] in RENDER_PRIORITY else len(RENDER_PRIORITY)
+        new_i = RENDER_PRIORITY.index(job["status"]) if job["status"] in RENDER_PRIORITY else len(RENDER_PRIORITY)
+        if new_i < cur_i:
+            rec["status"] = job["status"]
+            rec["progress"] = job.get("progress", 0.0)
+    return by_shot
+
+
+class DeadlineWorker(QThread):
+    done = Signal(object)     # {shot: {...}}
+    failed = Signal(str)
+
+    def __init__(self, client):
+        super().__init__()
+        self.client = client
+
+    def run(self):
+        try:
+            jobs = self.client.get_jobs()
+            self.done.emit(deadline_status_by_shot(jobs))
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  バックグラウンド・スキャン
 # ═══════════════════════════════════════════════════════════════════════════════
 class ScanWorker(QThread):
@@ -304,15 +503,16 @@ class ScanWorker(QThread):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Google Sheets 設定ダイアログ
+#  設定ダイアログ（Google Sheets ＋ Deadline）
 # ═══════════════════════════════════════════════════════════════════════════════
-class SheetSettingsDialog(QDialog):
+class SettingsDialog(QDialog):
     def __init__(self, settings, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Google Sheets 設定")
-        self.setMinimumWidth(480)
+        self.setWindowTitle("設定 — Google Sheets / Deadline")
+        self.setMinimumWidth(520)
         form = QFormLayout(self)
 
+        form.addRow(QLabel("■ Google Sheets"))
         self.sheetId = QLineEdit(settings.get("sheet_id", ""))
         self.sheetId.setPlaceholderText("スプレッドシート URL の /d/ と /edit の間の ID")
         form.addRow("シート ID:", self.sheetId)
@@ -329,6 +529,31 @@ class SheetSettingsDialog(QDialog):
         cred_row.addWidget(browse)
         form.addRow("認証 JSON:", cred_row)
 
+        form.addRow(QLabel(""))
+        form.addRow(QLabel("■ Deadline"))
+        self.dlMode = QComboBox()
+        self.dlMode.addItems(["webservice", "cli"])
+        i = self.dlMode.findText(settings.get("deadline_mode", "webservice"))
+        if i >= 0:
+            self.dlMode.setCurrentIndex(i)
+        form.addRow("方式:", self.dlMode)
+
+        self.dlHost = QLineEdit(settings.get("deadline_host", ""))
+        self.dlHost.setPlaceholderText("Web Service(RCS) のホスト名/IP")
+        form.addRow("ホスト:", self.dlHost)
+
+        self.dlPort = QLineEdit(str(settings.get("deadline_port", "8082")))
+        form.addRow("ポート:", self.dlPort)
+
+        cmd_row = QHBoxLayout()
+        self.dlCmd = QLineEdit(settings.get("deadline_cmd", ""))
+        self.dlCmd.setPlaceholderText("deadlinecommand のパス（CLI 方式・未指定なら自動探索）")
+        cbrowse = QPushButton("参照…")
+        cbrowse.clicked.connect(self._browse_cmd)
+        cmd_row.addWidget(self.dlCmd, 1)
+        cmd_row.addWidget(cbrowse)
+        form.addRow("deadlinecommand:", cmd_row)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -341,11 +566,20 @@ class SheetSettingsDialog(QDialog):
         if fp:
             self.cred.setText(fp)
 
+    def _browse_cmd(self):
+        fp, _ = QFileDialog.getOpenFileName(self, "deadlinecommand を選択", str(Path.home()))
+        if fp:
+            self.dlCmd.setText(fp)
+
     def values(self):
         return {
             "sheet_id": self.sheetId.text().strip(),
             "worksheet": self.worksheet.text().strip() or "Sheet1",
             "cred_path": self.cred.text().strip(),
+            "deadline_mode": self.dlMode.currentText(),
+            "deadline_host": self.dlHost.text().strip(),
+            "deadline_port": self.dlPort.text().strip() or "8082",
+            "deadline_cmd": self.dlCmd.text().strip(),
         }
 
 
@@ -410,7 +644,12 @@ class OGStageTracker(QWidget):
         self.pullBtn.clicked.connect(self._pull_render)
         bar.addWidget(self.pullBtn)
 
-        self.cfgBtn = QPushButton("⚙  Sheets 設定")
+        self.deadlineBtn = QPushButton("⟳  Deadline")
+        self.deadlineBtn.setToolTip("Deadline からレンダ状態を取得して Render 列に反映")
+        self.deadlineBtn.clicked.connect(self._fetch_deadline)
+        bar.addWidget(self.deadlineBtn)
+
+        self.cfgBtn = QPushButton("⚙  設定")
         self.cfgBtn.clicked.connect(self._edit_settings)
         bar.addWidget(self.cfgBtn)
         root.addLayout(bar)
@@ -544,14 +783,44 @@ class OGStageTracker(QWidget):
         except Exception:
             pass
 
-    # ── Google Sheets ────────────────────────────────────
+    # ── Render 列ヘルパー ────────────────────────────────
+    def _render_col(self):
+        return len(self._ordered_stages) + 2
+
+    @staticmethod
+    def _render_color(text):
+        low = str(text).lower()
+        if "rend" in low:
+            return QColor("#e8a838")      # レンダ中
+        if "queue" in low or "active" in low or "pend" in low:
+            return QColor("#4a9eff")      # 待機/キュー
+        if "fail" in low or "error" in low:
+            return QColor("#ff6b6b")      # 失敗
+        if "done" in low or "complete" in low:
+            return QColor("#3dcfb8")      # 完了
+        if "suspend" in low:
+            return QColor("#7a8190")      # 中断
+        return QColor("#9aa3b0")
+
+    def _set_render_cell(self, row, text):
+        item = QTableWidgetItem(text)
+        if text:
+            item.setForeground(self._render_color(text))
+        self.table.setItem(row, self._render_col(), item)
+
+    def _shot_at_row(self, row):
+        it = self.table.item(row, 0)
+        return it.text().lower() if it else None
+
+    # ── 設定 ─────────────────────────────────────────────
     def _edit_settings(self):
-        dlg = SheetSettingsDialog(self.settings, self)
+        dlg = SettingsDialog(self.settings, self)
         if dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec():
             self.settings.update(dlg.values())
             save_settings(self.settings)
-            self.status.setText("✓  Sheets 設定を保存しました")
+            self.status.setText("✓  設定を保存しました")
 
+    # ── Google Sheets ────────────────────────────────────
     def _sync(self):
         return SheetSync(
             self.settings.get("sheet_id", ""),
@@ -583,23 +852,63 @@ class OGStageTracker(QWidget):
             shot = str(rec.get("Shot", "")).lower()
             if shot:
                 render_by_shot[shot] = str(rec.get("Render", ""))
-        col = self._ordered_stages and (len(self._ordered_stages) + 2)
         for r in range(self.table.rowCount()):
-            shot_item = self.table.item(r, 0)
-            if not shot_item:
+            shot = self._shot_at_row(r)
+            if shot is None:
                 continue
-            val = render_by_shot.get(shot_item.text().lower(), "")
-            item = QTableWidgetItem(val)
-            if val:
-                low = val.lower()
-                if "rend" in low or "active" in low:
-                    item.setForeground(QColor("#e8a838"))   # レンダ中
-                elif "done" in low or "complete" in low:
-                    item.setForeground(QColor("#3dcfb8"))   # 完了
-                elif "fail" in low or "error" in low:
-                    item.setForeground(QColor("#ff6b6b"))   # 失敗
-            self.table.setItem(r, col, item)
+            self._set_render_cell(r, render_by_shot.get(shot, ""))
         self.status.setText("✓  Render 状態を取り込みました")
+
+    # ── Deadline ─────────────────────────────────────────
+    def _fetch_deadline(self):
+        """Deadline からレンダ状態を取得して Render 列へ反映する。"""
+        if self.table.rowCount() == 0:
+            self.status.setText("先に SCAN を実行してください")
+            return
+        mode = self.settings.get("deadline_mode", "webservice")
+        if mode == "webservice" and not self.settings.get("deadline_host"):
+            QMessageBox.information(
+                self, "Deadline 設定",
+                "Deadline の接続先が未設定です。[⚙ 設定] で方式とホスト等を設定してください。",
+            )
+            return
+        client = DeadlineClient(
+            mode=mode,
+            host=self.settings.get("deadline_host", ""),
+            port=self.settings.get("deadline_port", "8082"),
+            cmd_path=self.settings.get("deadline_cmd", ""),
+        )
+        self.deadlineBtn.setEnabled(False)
+        self.status.setText("Deadline からレンダ状態を取得中…")
+        self._dl = DeadlineWorker(client)
+        self._dl.done.connect(self._on_deadline_done)
+        self._dl.failed.connect(self._on_deadline_failed)
+        self._dl.start()
+
+    def _on_deadline_failed(self, msg):
+        self.deadlineBtn.setEnabled(True)
+        self.status.setText(f"⚠  Deadline 取得失敗: {msg}")
+
+    def _on_deadline_done(self, by_shot):
+        self.deadlineBtn.setEnabled(True)
+        rendering = 0
+        for r in range(self.table.rowCount()):
+            shot = self._shot_at_row(r)
+            rec = by_shot.get(shot) if shot else None
+            if not rec:
+                self._set_render_cell(r, "")
+                continue
+            status = rec.get("status", "")
+            prog = rec.get("progress", 0.0)
+            text = status
+            if status == "Rendering":
+                rendering += 1
+                if prog:
+                    text = f"Rendering {prog:.0f}%"
+            self._set_render_cell(r, text)
+        self.status.setText(
+            f"✓  Deadline 反映: レンダ中 {rendering} カット / {len(by_shot)} カットにジョブあり"
+        )
 
 
 def _get_maya_main_window():
