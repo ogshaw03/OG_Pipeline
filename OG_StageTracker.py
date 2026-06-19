@@ -552,18 +552,63 @@ class OGStageTracker(QWidget):
         self.status.setText("✓  Render 状態を取り込みました")
 
 
+def _get_maya_main_window():
+    """Maya メインウィンドウを QWidget として取得（親に設定して GC で閉じるのを防ぐ）。"""
+    try:
+        import OG_Pipeline
+        w = OG_Pipeline._get_maya_main_window()
+        if w is not None:
+            return w
+    except Exception:
+        pass
+    try:
+        import maya.OpenMayaUI as omui
+        try:
+            from shiboken2 import wrapInstance
+        except ImportError:
+            from shiboken6 import wrapInstance
+        ptr = omui.MQtUtil.mainWindow()
+        if ptr is not None:
+            return wrapInstance(int(ptr), QWidget)
+    except Exception:
+        pass
+    return None
+
+
+# 生成したウィンドウへの参照を保持し、ガベージコレクションによる即時クローズを防ぐ
+_TRACKER_WINDOW = None
+
+
 def main():
+    """
+    Maya 内: 既存の QApplication を使い、Maya メインウィンドウを親にして表示する。
+    （親付け＋モジュール参照保持をしないと、一瞬で閉じてしまう）
+    スタンドアロン: QApplication を新規作成してイベントループを回す。
+    """
+    global _TRACKER_WINDOW
+
     app = QApplication.instance()
-    if app is None:
-        # Maya 内では既存の QApplication を使う。スタンドアロンでは新規作成。
+    standalone = app is None
+    if standalone:
         app = QApplication(sys.argv)
-        win = OGStageTracker()
-        win.show()
-        sys.exit(app.exec_() if hasattr(app, "exec_") else app.exec())
-    win = OGStageTracker()
+
+    # 多重起動を防ぐ: 既存があれば閉じてから作り直す
+    if _TRACKER_WINDOW is not None:
+        try:
+            _TRACKER_WINDOW.close()
+            _TRACKER_WINDOW.deleteLater()
+        except Exception:
+            pass
+        _TRACKER_WINDOW = None
+
+    win = OGStageTracker(parent=_get_maya_main_window())
+    _TRACKER_WINDOW = win
     win.show()
     win.raise_()
     win.activateWindow()
+
+    if standalone:
+        sys.exit(app.exec_() if hasattr(app, "exec_") else app.exec())
     return win
 
 
