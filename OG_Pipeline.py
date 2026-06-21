@@ -30,7 +30,7 @@ try:
         QLabel, QPushButton, QTreeWidget, QTreeWidgetItem, QLineEdit,
         QSplitter, QFrame, QScrollArea, QComboBox, QMessageBox,
         QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
-        QListWidget, QListWidgetItem, QInputDialog
+        QListWidget, QListWidgetItem, QInputDialog, QMenu
     )
 except ImportError:
     try:
@@ -42,7 +42,7 @@ except ImportError:
             QLabel, QPushButton, QTreeWidget, QTreeWidgetItem, QLineEdit,
             QSplitter, QFrame, QScrollArea, QComboBox, QMessageBox,
             QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
-            QListWidget, QListWidgetItem, QInputDialog
+            QListWidget, QListWidgetItem, QInputDialog, QMenu
         )
     except ImportError:
         raise ImportError("PySide2 または PySide6 が必要です。")
@@ -522,6 +522,7 @@ class ColumnBrowser(QWidget):
     """
     file_selected = Signal(object)   # 選択ファイル情報 dict、解除時は None
     file_activated = Signal(str)     # ダブルクリックで開く（絶対パス）
+    context_requested = Signal(str, object)  # 右クリック: (絶対パス, グローバル座標)
 
     COL_WIDTH = 240        # 既定（最小）幅
     COL_MIN_WIDTH = 200    # カラムの下限幅
@@ -670,10 +671,21 @@ class ColumnBrowser(QWidget):
         lw.setTextElideMode(Qt.ElideNone)   # 名前を「…」で省略しない
         lw.itemClicked.connect(lambda item, w=lw: self._on_clicked(w, item))
         lw.itemDoubleClicked.connect(lambda item, w=lw: self._on_double(w, item))
+        lw.setContextMenuPolicy(Qt.CustomContextMenu)
+        lw.customContextMenuRequested.connect(lambda pos, w=lw: self._on_context(w, pos))
         v.addWidget(lw, 1)
 
         lw._container = container   # クリック処理はリスト本体を参照、レイアウトは container
         return lw
+
+    def _on_context(self, lw, pos):
+        """ファイル項目を右クリックしたら、絶対パスとグローバル座標を通知する。"""
+        item = lw.itemAt(pos)
+        if item is None:
+            return
+        data = item.data(Qt.UserRole)
+        if data and data[0] == "file":
+            self.context_requested.emit(data[1], lw.viewport().mapToGlobal(pos))
 
     def _list_dir(self, dir_path):
         dirs, files = [], []
@@ -981,6 +993,7 @@ class OGPipelineWindow(QWidget):
         self.browser = ColumnBrowser()
         self.browser.file_selected.connect(self._on_file_selected)
         self.browser.file_activated.connect(self._open_path)
+        self.browser.context_requested.connect(self._show_context_menu)
         layout.addWidget(self.browser, 1)
 
         action_bar = QWidget()
@@ -1256,6 +1269,92 @@ class OGPipelineWindow(QWidget):
             self.statusLabel.setText(
                 f"⚠  現在のシーンはこのルート配下にありません: {cur}"
             )
+
+    # ════════════════════════════════════════════════════════════════════
+    #  右クリックメニュー
+    # ════════════════════════════════════════════════════════════════════
+    def _show_context_menu(self, path, global_pos):
+        menu = QMenu(self)
+        act_open = menu.addAction("▶  シーンを開く")
+        act_import = menu.addAction("▤  インポート")
+        act_folder = menu.addAction("📂  フォルダを開く")
+        menu.addSeparator()
+        act_ref = menu.addAction("⊟  リファレンスを編集…")
+        chosen = menu.exec_(global_pos) if hasattr(menu, "exec_") else menu.exec(global_pos)
+        if chosen is None:
+            return
+        self._selected_path = path
+        if chosen == act_open:
+            self._open_scene()
+        elif chosen == act_import:
+            self._import_scene()
+        elif chosen == act_folder:
+            self._open_in_explorer()
+        elif chosen == act_ref:
+            self._edit_references(path)
+
+    def _edit_references(self, path):
+        """該当シーンのリファレンスを編集する。
+
+        Maya 内: そのシーンを開いて（必要なら）ネイティブの Reference Editor を表示。
+        スタンドアロン: .ma を解析してリファレンス一覧を読み取り表示（参照のみ）。
+        """
+        try:
+            import maya.cmds as cmds
+            import maya.mel as mel
+        except ImportError:
+            self._show_reference_list_standalone(path)
+            return
+
+        cur = cmds.file(q=True, sceneName=True) or ""
+        if os.path.normcase(os.path.normpath(cur)) != os.path.normcase(os.path.normpath(path)):
+            # まず対象シーンを開く（未保存確認は _open_scene 内で行う）
+            self._selected_path = path
+            self._open_scene()
+            cur = cmds.file(q=True, sceneName=True) or ""
+            if os.path.normcase(os.path.normpath(cur)) != os.path.normcase(os.path.normpath(path)):
+                return  # 開かなかった（キャンセル等）
+        try:
+            mel.eval("ReferenceEditor;")
+            self.statusLabel.setText(f"⊟  リファレンス編集: {Path(path).name}")
+        except Exception as e:
+            self.statusLabel.setText(f"⚠  Reference Editor を開けませんでした: {e}")
+
+    @staticmethod
+    def _parse_ma_references(path):
+        """.ma テキストから参照ファイルのパス一覧を抽出する（読み取り専用）。"""
+        refs = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    s = line.strip()
+                    if s.startswith("file ") and re.search(r"\s-r(di)?\b", s):
+                        quoted = re.findall(r'"((?:[^"\\]|\\.)*)"', s)
+                        if quoted:
+                            p = quoted[-1].replace('\\"', '"')
+                            if p not in refs:
+                                refs.append(p)
+        except Exception:
+            pass
+        return refs
+
+    def _show_reference_list_standalone(self, path):
+        ext = Path(path).suffix.lower()
+        if ext == ".mb":
+            QMessageBox.information(
+                self, "リファレンス（スタンドアロン）",
+                "Maya バイナリ(.mb)はスタンドアロンでは解析できません。\n"
+                "Maya 内で実行すると、シーンを開いて Reference Editor を表示します。",
+            )
+            return
+        refs = self._parse_ma_references(path)
+        if refs:
+            body = "\n".join(f"・{r}" for r in refs)
+            msg = f"{Path(path).name} のリファレンス（{len(refs)} 件・参照のみ）:\n\n{body}\n\n" \
+                  "編集（リパス等）は Maya 内で開いて Reference Editor を使用してください。"
+        else:
+            msg = f"{Path(path).name} にリファレンスは見つかりませんでした。"
+        QMessageBox.information(self, "リファレンス一覧（スタンドアロン）", msg)
 
     # ════════════════════════════════════════════════════════════════════
     #  Maya アクション
