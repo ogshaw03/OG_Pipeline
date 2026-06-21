@@ -1502,6 +1502,28 @@ class OGPipelineWindow(QWidget):
         m = re.search(re.escape(flag) + r'\s+"((?:[^"\\]|\\.)*)"', s)
         return m.group(1).replace('\\"', '"') if m else ""
 
+    @staticmethod
+    def _ref_path_match(line):
+        """file 行で「フラグの値ではない」引用トークン＝参照パスの Match を返す。
+
+        例: `file -rdi 1 -ns "ns" -rfn "nsRN" -typ "mayaAscii" "path.ma";`
+            → "path.ma"（-typ の値 "mayaAscii" は直前が -typ なので除外）。
+        パスを持たない -rdi 行（末尾が -typ "mayaAscii" 等）では None。
+        """
+        best = None
+        for m in re.finditer(r'"(?:[^"\\]|\\.)*"', line):
+            before = line[:m.start()].rstrip()
+            toks = before.split()
+            prev = toks[-1] if toks else ""
+            if not prev.startswith("-"):   # 直前がフラグでない＝位置引数（パス）
+                best = m
+        return best
+
+    @classmethod
+    def _ref_path(cls, line):
+        m = cls._ref_path_match(line)
+        return m.group(0)[1:-1].replace('\\"', '"') if m else None
+
     @classmethod
     def _parse_ma_reference_info(cls, path):
         """.ma の参照行から [{'key','path','namespace','refnode','type'}] を抽出。
@@ -1518,13 +1540,12 @@ class OGPipelineWindow(QWidget):
                     s = line.strip()
                     if not (s.startswith("file ") and re.search(r"\s-r(di)?\b", s)):
                         continue
-                    quoted = re.findall(r'"((?:[^"\\]|\\.)*)"', s)
-                    if not quoted:
-                        continue
-                    p = quoted[-1].replace('\\"', '"')
+                    p = cls._ref_path(line) or ""   # フラグ値ではない位置引数＝パス
                     ns = cls._ma_flag(s, "-ns")
                     rfn = cls._ma_flag(s, "-rfn")
                     typ = cls._ma_flag(s, "-typ")
+                    if not rfn and not p:
+                        continue   # パスも refNode も無い行は対象外
                     key = ("rfn:" + rfn) if rfn else ("path:" + p)
                     if key not in seen:
                         info = {"key": key, "path": p, "namespace": ns,
@@ -1563,21 +1584,17 @@ class OGPipelineWindow(QWidget):
         for line in content.splitlines(keepends=True):
             s = line.strip()
             if s.startswith("file ") and re.search(r"\s-r(di)?\b", s):
-                quoted = re.findall(r'"((?:[^"\\]|\\.)*)"', line)
                 rfn = cls._ma_flag(line, "-rfn")
-                old_token = quoted[-1] if quoted else None
-                old_path = old_token.replace('\\"', '"') if old_token else None
+                pm = cls._ref_path_match(line)   # パストークンの位置（フラグ値は除外）
+                old_path = pm.group(0)[1:-1].replace('\\"', '"') if pm else None
                 ch = by_refnode.get(rfn) if rfn else (by_path.get(old_path) if old_path else None)
                 if ch:
                     changed = False
-                    # パス（行内の最後の引用トークン）を置換
-                    if old_token is not None and ch["new_path"] != ch["old_path"]:
-                        needle = '"' + old_token + '"'
-                        idx = line.rfind(needle)
-                        if idx != -1:
-                            newtok = ch["new_path"].replace('"', '\\"')
-                            line = line[:idx] + '"' + newtok + '"' + line[idx + len(needle):]
-                            changed = True
+                    # パストークンだけを正確に置換（-typ 等の値は触らない）
+                    if pm is not None and ch["new_path"] != ch["old_path"]:
+                        newtok = ch["new_path"].replace('"', '\\"')
+                        line = line[:pm.start()] + '"' + newtok + '"' + line[pm.end():]
+                        changed = True
                     # ネームスペース（-ns）を置換
                     if ch.get("new_ns") != ch.get("old_ns"):
                         new_line = cls._replace_flag(line, "-ns", ch.get("new_ns", ""))
