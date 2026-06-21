@@ -31,7 +31,7 @@ try:
         QSplitter, QFrame, QScrollArea, QComboBox, QMessageBox,
         QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
         QListWidget, QListWidgetItem, QInputDialog, QMenu,
-        QDialog, QDialogButtonBox
+        QDialog, QDialogButtonBox, QGridLayout
     )
 except ImportError:
     try:
@@ -44,7 +44,7 @@ except ImportError:
             QSplitter, QFrame, QScrollArea, QComboBox, QMessageBox,
             QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
             QListWidget, QListWidgetItem, QInputDialog, QMenu,
-            QDialog, QDialogButtonBox
+            QDialog, QDialogButtonBox, QGridLayout
         )
     except ImportError:
         raise ImportError("PySide2 または PySide6 が必要です。")
@@ -804,51 +804,123 @@ class ColumnBrowser(QWidget):
         self.container.setMinimumWidth(max(1, total))
 
 
-# ─── リファレンス編集ダイアログ ───────────────────────────────────────────────
+# ─── リファレンス編集ダイアログ（Reference Editor 風） ──────────────────────────
+REF_DIALOG_STYLE = """
+QDialog { background:#0f1117; color:#c8ccd4; font-family:"Consolas",monospace; font-size:12px; }
+#refTitle { color:#e8a838; font-size:13px; font-weight:bold; letter-spacing:2px;
+            padding:10px 12px; background:#141824; border-bottom:2px solid #e8a838; }
+#refSub { color:#3a4a6a; font-size:10px; padding:4px 12px; }
+#refHeadRow { background:#141824; border-bottom:1px solid #2a3045; }
+#refHead { color:#e8a838; font-size:11px; letter-spacing:1px; padding:4px 6px; }
+#refNode { color:#e8c87a; }
+#refNs { color:#4a9eff; }
+#refType { color:#3dcfb8; }
+QLineEdit { background:#1a1f2e; border:1px solid #2a3045; border-radius:3px;
+            color:#c8ccd4; padding:4px 6px; }
+QLineEdit:focus { border-color:#e8a838; }
+QPushButton { background:#1a1f2e; color:#c8ccd4; border:1px solid #2a3045;
+              border-radius:3px; padding:4px 10px; }
+QPushButton:hover { border-color:#4a9eff; color:#4a9eff; }
+QScrollArea { border:none; }
+"""
+
+
 class ReferenceEditDialog(QDialog):
-    """シーンを開かずに .ma のリファレンスパスを編集する。"""
-    def __init__(self, file_path, refs, parent=None):
+    """シーンを開かずに .ma のリファレンスを編集する（Reference Editor 風の表表示）。
+
+    refinfos: [{'path','namespace','refnode','type'}, ...]
+    """
+    def __init__(self, file_path, refinfos, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"リファレンス編集 — {Path(file_path).name}")
-        self.setMinimumWidth(680)
-        self.setStyleSheet(STYLE)
-        self._edits = []
+        self.setWindowTitle("Reference Editor — " + Path(file_path).name)
+        self.setMinimumSize(820, 460)
+        self.setStyleSheet(REF_DIALOG_STYLE)
+        self._rows = []
 
         outer = QVBoxLayout(self)
-        info = QLabel("各リファレンスのパスを編集できます。\n"
-                      "シーンは開かず、.ma を直接書き換えます（保存時にバックアップを作成）。")
-        info.setWordWrap(True)
-        outer.addWidget(info)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
+        title = QLabel("◈  REFERENCE EDITOR")
+        title.setObjectName("refTitle")
+        outer.addWidget(title)
+        sub = QLabel(f"{file_path}    —    {len(refinfos)} references")
+        sub.setObjectName("refSub")
+        sub.setWordWrap(True)
+        outer.addWidget(sub)
+
+        # 列ヘッダ
+        head = QWidget()
+        head.setObjectName("refHeadRow")
+        hg = QGridLayout(head)
+        hg.setContentsMargins(10, 0, 10, 0)
+        hg.setHorizontalSpacing(10)
+        for c, h in enumerate(["Reference Node", "Namespace", "Type", "File Path", ""]):
+            lab = QLabel(h)
+            lab.setObjectName("refHead")
+            hg.addWidget(lab, 0, c)
+        hg.setColumnMinimumWidth(0, 150)
+        hg.setColumnMinimumWidth(1, 110)
+        hg.setColumnMinimumWidth(2, 40)
+        hg.setColumnStretch(3, 1)
+        hg.setColumnMinimumWidth(4, 64)
+        outer.addWidget(head)
+
+        # 行（スクロール内）
         content = QWidget()
-        vl = QVBoxLayout(content)
-        vl.setContentsMargins(0, 0, 0, 0)
-        vl.setSpacing(6)
-        for i, old in enumerate(refs):
-            row = QHBoxLayout()
-            lab = QLabel(f"{i + 1}.")
-            lab.setFixedWidth(24)
-            edit = QLineEdit(old)
-            edit.setToolTip(old)
+        grid = QGridLayout(content)
+        grid.setContentsMargins(10, 6, 10, 6)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        grid.setColumnMinimumWidth(0, 150)
+        grid.setColumnMinimumWidth(1, 110)
+        grid.setColumnMinimumWidth(2, 40)
+        grid.setColumnStretch(3, 1)
+        grid.setColumnMinimumWidth(4, 64)
+
+        for r, info in enumerate(refinfos):
+            node = QLabel(info.get("refnode") or "—")
+            node.setObjectName("refNode")
+            ns = QLabel(info.get("namespace") or "—")
+            ns.setObjectName("refNs")
+            typ = QLabel(self._short_type(info.get("type", "")))
+            typ.setObjectName("refType")
+            edit = QLineEdit(info["path"])
+            edit.setToolTip(info["path"])
             browse = QPushButton("参照…")
             browse.setFixedWidth(64)
             browse.clicked.connect(lambda _=False, e=edit: self._browse(e))
-            row.addWidget(lab)
-            row.addWidget(edit, 1)
-            row.addWidget(browse)
-            vl.addLayout(row)
-            self._edits.append((old, edit))
-        vl.addStretch()
+            grid.addWidget(node, r, 0)
+            grid.addWidget(ns, r, 1)
+            grid.addWidget(typ, r, 2)
+            grid.addWidget(edit, r, 3)
+            grid.addWidget(browse, r, 4)
+            self._rows.append((info["path"], edit))
+        grid.setRowStretch(len(refinfos), 1)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(content)
         outer.addWidget(scroll, 1)
 
+        foot = QWidget()
+        fl = QHBoxLayout(foot)
+        fl.setContentsMargins(10, 6, 10, 10)
+        hint = QLabel("シーンは開かずに .ma を直接書き換えます（保存時にバックアップを作成）")
+        hint.setObjectName("refSub")
+        fl.addWidget(hint, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        save_btn = buttons.button(QDialogButtonBox.Save)
+        if save_btn:
+            save_btn.setText("Replace（保存）")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
+        fl.addWidget(buttons)
+        outer.addWidget(foot)
+
+    @staticmethod
+    def _short_type(t):
+        return {"mayaAscii": ".ma", "mayaBinary": ".mb"}.get(t, t or "")
 
     def _browse(self, edit):
         start = os.path.dirname(edit.text()) or str(Path.home())
@@ -861,7 +933,7 @@ class ReferenceEditDialog(QDialog):
     def mapping(self):
         """変更があったものだけ {old_path: new_path} を返す。"""
         out = {}
-        for old, edit in self._edits:
+        for old, edit in self._rows:
             new = edit.text().strip()
             if new and new != old:
                 out[old] = new
@@ -1386,15 +1458,15 @@ class OGPipelineWindow(QWidget):
         except ImportError:
             pass
 
-        refs = self._parse_ma_references(path)
-        if not refs:
+        refinfos = self._parse_ma_reference_info(path)
+        if not refinfos:
             QMessageBox.information(
                 self, "リファレンス編集",
                 f"{Path(path).name} に編集できるリファレンスは見つかりませんでした。",
             )
             return
 
-        dlg = ReferenceEditDialog(path, refs, self)
+        dlg = ReferenceEditDialog(path, refinfos, self)
         ok = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
         if not ok:
             return
@@ -1412,22 +1484,41 @@ class OGPipelineWindow(QWidget):
         )
 
     @staticmethod
-    def _parse_ma_references(path):
-        """.ma テキストから参照ファイルのパス一覧を抽出する（重複除去）。"""
-        refs = []
+    def _ma_flag(s, flag):
+        """file 行から -ns/-rfn/-typ などのフラグ値（直後の引用文字列）を取り出す。"""
+        m = re.search(re.escape(flag) + r'\s+"((?:[^"\\]|\\.)*)"', s)
+        return m.group(1).replace('\\"', '"') if m else ""
+
+    @classmethod
+    def _parse_ma_reference_info(cls, path):
+        """.ma の参照行から [{'path','namespace','refnode','type'}] を抽出（パスで重複除去）。"""
+        infos = []
+        seen = {}
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
                     s = line.strip()
-                    if s.startswith("file ") and re.search(r"\s-r(di)?\b", s):
-                        quoted = re.findall(r'"((?:[^"\\]|\\.)*)"', s)
-                        if quoted:
-                            p = quoted[-1].replace('\\"', '"')
-                            if p not in refs:
-                                refs.append(p)
+                    if not (s.startswith("file ") and re.search(r"\s-r(di)?\b", s)):
+                        continue
+                    quoted = re.findall(r'"((?:[^"\\]|\\.)*)"', s)
+                    if not quoted:
+                        continue
+                    p = quoted[-1].replace('\\"', '"')
+                    ns = cls._ma_flag(s, "-ns")
+                    rfn = cls._ma_flag(s, "-rfn")
+                    typ = cls._ma_flag(s, "-typ")
+                    if p not in seen:
+                        info = {"path": p, "namespace": ns, "refnode": rfn, "type": typ}
+                        seen[p] = info
+                        infos.append(info)
+                    else:  # -rdi 行に欠けていた情報を -r 行などで補完
+                        info = seen[p]
+                        info["namespace"] = info["namespace"] or ns
+                        info["refnode"] = info["refnode"] or rfn
+                        info["type"] = info["type"] or typ
         except Exception:
             pass
-        return refs
+        return infos
 
     @staticmethod
     def _rewrite_ma_references(path, mapping):
