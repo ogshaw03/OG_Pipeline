@@ -881,21 +881,22 @@ class ReferenceEditDialog(QDialog):
         for r, info in enumerate(refinfos):
             node = QLabel(info.get("refnode") or "—")
             node.setObjectName("refNode")
-            ns = QLabel(info.get("namespace") or "—")
-            ns.setObjectName("refNs")
+            ns_edit = QLineEdit(info.get("namespace", ""))
+            ns_edit.setObjectName("refNs")
+            ns_edit.setToolTip("ネームスペース（-ns）。書き換え可能")
             typ = QLabel(self._short_type(info.get("type", "")))
             typ.setObjectName("refType")
-            edit = QLineEdit(info["path"])
-            edit.setToolTip(info["path"])
+            path_edit = QLineEdit(info["path"])
+            path_edit.setToolTip(info["path"])
             browse = QPushButton("参照…")
             browse.setFixedWidth(64)
-            browse.clicked.connect(lambda _=False, e=edit: self._browse(e))
+            browse.clicked.connect(lambda _=False, e=path_edit: self._browse(e))
             grid.addWidget(node, r, 0)
-            grid.addWidget(ns, r, 1)
+            grid.addWidget(ns_edit, r, 1)
             grid.addWidget(typ, r, 2)
-            grid.addWidget(edit, r, 3)
+            grid.addWidget(path_edit, r, 3)
             grid.addWidget(browse, r, 4)
-            self._rows.append((info["path"], edit))
+            self._rows.append((info, path_edit, ns_edit))
         grid.setRowStretch(len(refinfos), 1)
 
         scroll = QScrollArea()
@@ -930,13 +931,25 @@ class ReferenceEditDialog(QDialog):
         if fp:
             edit.setText(fp)
 
-    def mapping(self):
-        """変更があったものだけ {old_path: new_path} を返す。"""
-        out = {}
-        for old, edit in self._rows:
-            new = edit.text().strip()
-            if new and new != old:
-                out[old] = new
+    def changes(self):
+        """変更のあった参照のみ、変更内容のリストを返す。
+
+        各要素: {refnode, old_path, new_path, old_ns, new_ns}
+        """
+        out = []
+        for info, path_edit, ns_edit in self._rows:
+            new_path = path_edit.text().strip()
+            new_ns = ns_edit.text().strip()
+            old_path = info["path"]
+            old_ns = info.get("namespace", "")
+            if (new_path and new_path != old_path) or (new_ns != old_ns):
+                out.append({
+                    "refnode": info.get("refnode", ""),
+                    "old_path": old_path,
+                    "new_path": new_path or old_path,
+                    "old_ns": old_ns,
+                    "new_ns": new_ns,
+                })
         return out
 
 
@@ -1470,12 +1483,12 @@ class OGPipelineWindow(QWidget):
         ok = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
         if not ok:
             return
-        mapping = dlg.mapping()
-        if not mapping:
+        changes = dlg.changes()
+        if not changes:
             self.statusLabel.setText("リファレンスの変更はありません")
             return
         try:
-            backup, n = self._rewrite_ma_references(path, mapping)
+            backup, n = self._rewrite_ma_references(path, changes)
         except Exception as e:
             QMessageBox.warning(self, "保存失敗", f"書き換えに失敗しました:\n{e}")
             return
@@ -1491,7 +1504,12 @@ class OGPipelineWindow(QWidget):
 
     @classmethod
     def _parse_ma_reference_info(cls, path):
-        """.ma の参照行から [{'path','namespace','refnode','type'}] を抽出（パスで重複除去）。"""
+        """.ma の参照行から [{'key','path','namespace','refnode','type'}] を抽出。
+
+        同定キーは reference node（-rfn）。同じパスを別ネームスペースで複数参照する
+        ケースを区別するため、パスではなく refNode で重複除去する。
+        -rfn が無い参照はパスをキーにフォールバック。
+        """
         infos = []
         seen = {}
         try:
@@ -1507,28 +1525,35 @@ class OGPipelineWindow(QWidget):
                     ns = cls._ma_flag(s, "-ns")
                     rfn = cls._ma_flag(s, "-rfn")
                     typ = cls._ma_flag(s, "-typ")
-                    if p not in seen:
-                        info = {"path": p, "namespace": ns, "refnode": rfn, "type": typ}
-                        seen[p] = info
+                    key = ("rfn:" + rfn) if rfn else ("path:" + p)
+                    if key not in seen:
+                        info = {"key": key, "path": p, "namespace": ns,
+                                "refnode": rfn, "type": typ}
+                        seen[key] = info
                         infos.append(info)
-                    else:  # -rdi 行に欠けていた情報を -r 行などで補完
-                        info = seen[p]
+                    else:  # -rdi 行と -r 行で欠けた情報を相互補完
+                        info = seen[key]
                         info["namespace"] = info["namespace"] or ns
-                        info["refnode"] = info["refnode"] or rfn
                         info["type"] = info["type"] or typ
+                        info["path"] = info["path"] or p
         except Exception:
             pass
         return infos
 
-    @staticmethod
-    def _rewrite_ma_references(path, mapping):
-        """.ma の参照行のパスを mapping に従って置換し、保存する。
+    @classmethod
+    def _rewrite_ma_references(cls, path, changes):
+        """.ma の参照行を changes に従って書き換える（パス＋ネームスペース）。
 
-        改行コードはそのまま維持。書き換え前にタイムスタンプ付きバックアップを作成。
-        戻り値: (バックアップパス, 置換した行数)。
+        changes: [{refnode, old_path, new_path, old_ns, new_ns}, ...]
+        各行は refNode（無ければパス）で対象判定。改行コードは維持し、
+        書き換え前にタイムスタンプ付きバックアップを作成。
+        戻り値: (バックアップパス, 変更した行数)。
         """
         import shutil
         import datetime
+
+        by_refnode = {c["refnode"]: c for c in changes if c.get("refnode")}
+        by_path = {c["old_path"]: c for c in changes if not c.get("refnode")}
 
         with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
             content = f.read()
@@ -1539,16 +1564,28 @@ class OGPipelineWindow(QWidget):
             s = line.strip()
             if s.startswith("file ") and re.search(r"\s-r(di)?\b", s):
                 quoted = re.findall(r'"((?:[^"\\]|\\.)*)"', line)
-                if quoted:
-                    old_token = quoted[-1]
-                    old_unesc = old_token.replace('\\"', '"')
-                    if old_unesc in mapping:
-                        new_token = mapping[old_unesc].replace('"', '\\"')
+                rfn = cls._ma_flag(line, "-rfn")
+                old_token = quoted[-1] if quoted else None
+                old_path = old_token.replace('\\"', '"') if old_token else None
+                ch = by_refnode.get(rfn) if rfn else (by_path.get(old_path) if old_path else None)
+                if ch:
+                    changed = False
+                    # パス（行内の最後の引用トークン）を置換
+                    if old_token is not None and ch["new_path"] != ch["old_path"]:
                         needle = '"' + old_token + '"'
                         idx = line.rfind(needle)
                         if idx != -1:
-                            line = line[:idx] + '"' + new_token + '"' + line[idx + len(needle):]
-                            count += 1
+                            newtok = ch["new_path"].replace('"', '\\"')
+                            line = line[:idx] + '"' + newtok + '"' + line[idx + len(needle):]
+                            changed = True
+                    # ネームスペース（-ns）を置換
+                    if ch.get("new_ns") != ch.get("old_ns"):
+                        new_line = cls._replace_flag(line, "-ns", ch.get("new_ns", ""))
+                        if new_line != line:
+                            line = new_line
+                            changed = True
+                    if changed:
+                        count += 1
             out_parts.append(line)
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1557,6 +1594,13 @@ class OGPipelineWindow(QWidget):
         with open(path, "w", encoding="utf-8", newline="") as f:
             f.write("".join(out_parts))
         return backup, count
+
+    @staticmethod
+    def _replace_flag(line, flag, new_value):
+        """行内の `flag "..."` の値を new_value に置換（最初の1箇所のみ）。"""
+        newesc = new_value.replace('"', '\\"')
+        return re.sub(re.escape(flag) + r'\s+"(?:[^"\\]|\\.)*"',
+                      flag + ' "' + newesc + '"', line, count=1)
 
     # ════════════════════════════════════════════════════════════════════
     #  Maya アクション
