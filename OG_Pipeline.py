@@ -1544,51 +1544,78 @@ class OGPipelineWindow(QWidget):
         m = cls._ref_path_match(line)
         return m.group(0)[1:-1].replace('\\"', '"') if m else None
 
+    @staticmethod
+    def _split_ref_statements(content):
+        """content を [(is_ref, text), ...] に分割する。
+
+        Maya の file コマンドは複数行に分かれることがある（例: -typ "mayaAscii" の
+        次の行にパス）。`file -r/-rdi` で始まる行から、行末が ';' で終わる行までを
+        1つの参照文(text)としてまとめる。それ以外は物理行のまま通す。
+        連結すると元の content を完全再現する（改行コードも保持）。
+        """
+        lines = content.splitlines(keepends=True)
+        segs = []
+        i, n = 0, len(lines)
+        while i < n:
+            s = lines[i].strip()
+            if s.startswith("file ") and re.search(r"\s-r(di)?\b", s):
+                group = [lines[i]]
+                while not group[-1].rstrip().endswith(";"):
+                    i += 1
+                    if i >= n:
+                        break
+                    group.append(lines[i])
+                segs.append((True, "".join(group)))
+                i += 1
+            else:
+                segs.append((False, lines[i]))
+                i += 1
+        return segs
+
     @classmethod
     def _parse_ma_reference_info(cls, path):
-        """.ma の参照行から [{'key','path','namespace','refnode','type'}] を抽出。
+        """.ma の参照文から [{'key','path','namespace','refnode','type'}] を抽出。
 
-        同定キーは reference node（-rfn）。同じパスを別ネームスペースで複数参照する
-        ケースを区別するため、パスではなく refNode で重複除去する。
-        -rfn が無い参照はパスをキーにフォールバック。
+        複数行にまたがる file 文も1文として解析する。同定キーは reference node
+        （-rfn）。同じパスを別ネームスペースで複数参照するケースを区別するため、
+        パスではなく refNode で重複除去する（-rfn が無ければパスにフォールバック）。
         """
         infos = []
         seen = {}
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    s = line.strip()
-                    if not (s.startswith("file ") and re.search(r"\s-r(di)?\b", s)):
-                        continue
-                    p = cls._ref_path(line) or ""   # フラグ値ではない位置引数＝パス
-                    ns = cls._ma_flag(s, "-ns")
-                    rfn = cls._ma_flag(s, "-rfn")
-                    typ = cls._ma_flag(s, "-typ")
-                    if not rfn and not p:
-                        continue   # パスも refNode も無い行は対象外
-                    key = ("rfn:" + rfn) if rfn else ("path:" + p)
-                    if key not in seen:
-                        info = {"key": key, "path": p, "namespace": ns,
-                                "refnode": rfn, "type": typ}
-                        seen[key] = info
-                        infos.append(info)
-                    else:  # -rdi 行と -r 行で欠けた情報を相互補完
-                        info = seen[key]
-                        info["namespace"] = info["namespace"] or ns
-                        info["type"] = info["type"] or typ
-                        info["path"] = info["path"] or p
+            with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+                content = f.read()
         except Exception:
-            pass
+            return infos
+        for is_ref, text in cls._split_ref_statements(content):
+            if not is_ref:
+                continue
+            p = cls._ref_path(text) or ""
+            ns = cls._ma_flag(text, "-ns")
+            rfn = cls._ma_flag(text, "-rfn")
+            typ = cls._ma_flag(text, "-typ")
+            if not rfn and not p:
+                continue
+            key = ("rfn:" + rfn) if rfn else ("path:" + p)
+            if key not in seen:
+                info = {"key": key, "path": p, "namespace": ns,
+                        "refnode": rfn, "type": typ}
+                seen[key] = info
+                infos.append(info)
+            else:
+                info = seen[key]
+                info["namespace"] = info["namespace"] or ns
+                info["type"] = info["type"] or typ
+                info["path"] = info["path"] or p
         return infos
 
     @classmethod
     def _rewrite_ma_references(cls, path, changes):
-        """.ma の参照行を changes に従って書き換える（パス＋ネームスペース）。
+        """.ma の参照文を changes に従って書き換える（パス＋ネームスペース）。
 
-        changes: [{refnode, old_path, new_path, old_ns, new_ns}, ...]
-        各行は refNode（無ければパス）で対象判定。改行コードは維持し、
-        書き換え前にタイムスタンプ付きバックアップを作成。
-        戻り値: (バックアップパス, 変更した行数)。
+        複数行にまたがる file 文にも対応。各文は refNode（無ければパス）で対象判定。
+        改行コードは維持し、書き換え前にタイムスタンプ付きバックアップを作成する。
+        戻り値: (バックアップパス, 変更した参照数)。
         """
         import shutil
         import datetime
@@ -1601,29 +1628,26 @@ class OGPipelineWindow(QWidget):
 
         count = 0
         out_parts = []
-        for line in content.splitlines(keepends=True):
-            s = line.strip()
-            if s.startswith("file ") and re.search(r"\s-r(di)?\b", s):
-                rfn = cls._ma_flag(line, "-rfn")
-                pm = cls._ref_path_match(line)   # パストークンの位置（フラグ値は除外）
+        for is_ref, text in cls._split_ref_statements(content):
+            if is_ref:
+                rfn = cls._ma_flag(text, "-rfn")
+                pm = cls._ref_path_match(text)
                 old_path = pm.group(0)[1:-1].replace('\\"', '"') if pm else None
                 ch = by_refnode.get(rfn) if rfn else (by_path.get(old_path) if old_path else None)
                 if ch:
                     changed = False
-                    # パストークンだけを正確に置換（-typ 等の値は触らない）
                     if pm is not None and ch["new_path"] != ch["old_path"]:
                         newtok = ch["new_path"].replace('"', '\\"')
-                        line = line[:pm.start()] + '"' + newtok + '"' + line[pm.end():]
+                        text = text[:pm.start()] + '"' + newtok + '"' + text[pm.end():]
                         changed = True
-                    # ネームスペース（-ns）を置換
                     if ch.get("new_ns") != ch.get("old_ns"):
-                        new_line = cls._replace_flag(line, "-ns", ch.get("new_ns", ""))
-                        if new_line != line:
-                            line = new_line
+                        new_text = cls._replace_flag(text, "-ns", ch.get("new_ns", ""))
+                        if new_text != text:
+                            text = new_text
                             changed = True
                     if changed:
                         count += 1
-            out_parts.append(line)
+            out_parts.append(text)
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup = f"{path}.{ts}.bak"
