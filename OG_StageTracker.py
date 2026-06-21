@@ -39,7 +39,7 @@ try:
         QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
         QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
         QFileDialog, QLineEdit, QDialog, QFormLayout, QDialogButtonBox, QAbstractItemView,
-        QInputDialog
+        QInputDialog, QPlainTextEdit
     )
 except ImportError:
     from PySide6.QtCore import Qt, QThread, Signal
@@ -48,7 +48,7 @@ except ImportError:
         QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
         QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
         QFileDialog, QLineEdit, QDialog, QFormLayout, QDialogButtonBox, QAbstractItemView,
-        QInputDialog
+        QInputDialog, QPlainTextEdit
     )
 
 MAYA_EXTENSIONS = {".ma", ".mb"}
@@ -113,7 +113,11 @@ def save_settings(data):
 
 def get_stages():
     """工程定義を返す（設定で上書き可能、無ければ既定）。"""
-    stages = load_settings().get("stages")
+    return stages_from_value(load_settings().get("stages"))
+
+
+def stages_from_value(stages):
+    """任意の値を [{'code','label'}, ...] に正規化。無効なら既定を返す。"""
     if isinstance(stages, list) and stages:
         out = []
         for s in stages:
@@ -123,6 +127,30 @@ def get_stages():
         if out:
             return out
     return list(DEFAULT_STAGES)
+
+
+def stages_to_text(stages):
+    """工程定義を編集用テキストに変換（1行 = 'code, 表示名'、上から進行順）。"""
+    return "\n".join(f"{s['code']}, {s.get('label', s['code'])}" for s in stages)
+
+
+def stages_from_text(text):
+    """編集テキストを工程定義リストに変換。1行 'code[, 表示名]'。空行・重複は除外。"""
+    out, seen = [], set()
+    for line in str(text).splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "," in line:
+            code, label = line.split(",", 1)
+        else:
+            code, label = line, line
+        code = code.strip().lower()
+        label = label.strip() or code
+        if code and code not in seen:
+            seen.add(code)
+            out.append({"code": code, "label": label})
+    return out
 
 
 def load_project_roots():
@@ -468,15 +496,24 @@ class ScanWorker(QThread):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  設定ダイアログ（Google Sheets ＋ Deadline）
+#  設定ダイアログ（工程 ＋ Deadline）
 # ═══════════════════════════════════════════════════════════════════════════════
 class SettingsDialog(QDialog):
     def __init__(self, settings, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("設定 — Deadline")
+        self.setWindowTitle("設定 — 工程 / Deadline")
         self.setMinimumWidth(520)
         form = QFormLayout(self)
 
+        # ── 工程（ステージ）定義 ──
+        form.addRow(QLabel("■ 工程（上から進行順 / 1行に「code, 表示名」）"))
+        self.stagesEdit = QPlainTextEdit()
+        self.stagesEdit.setPlaceholderText("lay_pri, Layout / Primary\nlay_anm, Layout / Anim\nanm_sec, Anim / Secondary")
+        self.stagesEdit.setPlainText(stages_to_text(stages_from_value(settings.get("stages"))))
+        self.stagesEdit.setFixedHeight(120)
+        form.addRow(self.stagesEdit)
+
+        form.addRow(QLabel(""))
         form.addRow(QLabel("■ Deadline"))
         self.dlMode = QComboBox()
         self.dlMode.addItems(["webservice", "cli"])
@@ -513,6 +550,7 @@ class SettingsDialog(QDialog):
 
     def values(self):
         return {
+            "stages": stages_from_text(self.stagesEdit.toPlainText()),
             "deadline_mode": self.dlMode.currentText(),
             "deadline_host": self.dlHost.text().strip(),
             "deadline_port": self.dlPort.text().strip() or "8082",
@@ -790,7 +828,14 @@ class OGStageTracker(QWidget):
         if dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec():
             self.settings.update(dlg.values())
             save_settings(self.settings)
+            # 工程定義を反映（順序・ラベル・現工程判定に効く）
+            self.stages = stages_from_value(self.settings.get("stages"))
+            self.stage_order = [s["code"] for s in self.stages]
+            self.stage_labels = {s["code"]: s["label"] for s in self.stages}
             self.status.setText("✓  設定を保存しました")
+            # ルートが選択済みなら、新しい工程定義で再スキャンして表を更新
+            if self._active_root():
+                self._scan_now()
 
     # ── Deadline ─────────────────────────────────────────
     def _fetch_deadline(self):
