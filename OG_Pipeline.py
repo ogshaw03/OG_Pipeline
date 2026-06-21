@@ -30,7 +30,8 @@ try:
         QLabel, QPushButton, QTreeWidget, QTreeWidgetItem, QLineEdit,
         QSplitter, QFrame, QScrollArea, QComboBox, QMessageBox,
         QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
-        QListWidget, QListWidgetItem, QInputDialog, QMenu
+        QListWidget, QListWidgetItem, QInputDialog, QMenu,
+        QDialog, QDialogButtonBox
     )
 except ImportError:
     try:
@@ -42,7 +43,8 @@ except ImportError:
             QLabel, QPushButton, QTreeWidget, QTreeWidgetItem, QLineEdit,
             QSplitter, QFrame, QScrollArea, QComboBox, QMessageBox,
             QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
-            QListWidget, QListWidgetItem, QInputDialog, QMenu
+            QListWidget, QListWidgetItem, QInputDialog, QMenu,
+            QDialog, QDialogButtonBox
         )
     except ImportError:
         raise ImportError("PySide2 または PySide6 が必要です。")
@@ -802,6 +804,70 @@ class ColumnBrowser(QWidget):
         self.container.setMinimumWidth(max(1, total))
 
 
+# ─── リファレンス編集ダイアログ ───────────────────────────────────────────────
+class ReferenceEditDialog(QDialog):
+    """シーンを開かずに .ma のリファレンスパスを編集する。"""
+    def __init__(self, file_path, refs, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"リファレンス編集 — {Path(file_path).name}")
+        self.setMinimumWidth(680)
+        self.setStyleSheet(STYLE)
+        self._edits = []
+
+        outer = QVBoxLayout(self)
+        info = QLabel("各リファレンスのパスを編集できます。\n"
+                      "シーンは開かず、.ma を直接書き換えます（保存時にバックアップを作成）。")
+        info.setWordWrap(True)
+        outer.addWidget(info)
+
+        content = QWidget()
+        vl = QVBoxLayout(content)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(6)
+        for i, old in enumerate(refs):
+            row = QHBoxLayout()
+            lab = QLabel(f"{i + 1}.")
+            lab.setFixedWidth(24)
+            edit = QLineEdit(old)
+            edit.setToolTip(old)
+            browse = QPushButton("参照…")
+            browse.setFixedWidth(64)
+            browse.clicked.connect(lambda _=False, e=edit: self._browse(e))
+            row.addWidget(lab)
+            row.addWidget(edit, 1)
+            row.addWidget(browse)
+            vl.addLayout(row)
+            self._edits.append((old, edit))
+        vl.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+
+    def _browse(self, edit):
+        start = os.path.dirname(edit.text()) or str(Path.home())
+        fp, _ = QFileDialog.getOpenFileName(
+            self, "リファレンス先を選択", start, "Maya Files (*.ma *.mb);;All Files (*)"
+        )
+        if fp:
+            edit.setText(fp)
+
+    def mapping(self):
+        """変更があったものだけ {old_path: new_path} を返す。"""
+        out = {}
+        for old, edit in self._edits:
+            new = edit.text().strip()
+            if new and new != old:
+                out[old] = new
+        return out
+
+
 # ─── メインウィンドウ ─────────────────────────────────────────────────────────
 class OGPipelineWindow(QWidget):
     """
@@ -1294,35 +1360,60 @@ class OGPipelineWindow(QWidget):
             self._edit_references(path)
 
     def _edit_references(self, path):
-        """該当シーンのリファレンスを編集する。
-
-        Maya 内: そのシーンを開いて（必要なら）ネイティブの Reference Editor を表示。
-        スタンドアロン: .ma を解析してリファレンス一覧を読み取り表示（参照のみ）。
-        """
-        try:
-            import maya.cmds as cmds
-            import maya.mel as mel
-        except ImportError:
-            self._show_reference_list_standalone(path)
+        """シーンを開かずに .ma のリファレンスパスを直接編集する。"""
+        if Path(path).suffix.lower() != ".ma":
+            QMessageBox.information(
+                self, "リファレンス編集",
+                "直接編集は .ma のみ対応です。\n"
+                "（.mb はバイナリのため、Maya 内で開いて Reference Editor を使用してください）",
+            )
             return
 
-        cur = cmds.file(q=True, sceneName=True) or ""
-        if os.path.normcase(os.path.normpath(cur)) != os.path.normcase(os.path.normpath(path)):
-            # まず対象シーンを開く（未保存確認は _open_scene 内で行う）
-            self._selected_path = path
-            self._open_scene()
-            cur = cmds.file(q=True, sceneName=True) or ""
-            if os.path.normcase(os.path.normpath(cur)) != os.path.normcase(os.path.normpath(path)):
-                return  # 開かなかった（キャンセル等）
+        # 対象が現在 Maya で開かれている場合は注意喚起
         try:
-            mel.eval("ReferenceEditor;")
-            self.statusLabel.setText(f"⊟  リファレンス編集: {Path(path).name}")
+            import maya.cmds as cmds
+            cur = cmds.file(q=True, sceneName=True) or ""
+            if os.path.normcase(os.path.normpath(cur)) == os.path.normcase(os.path.normpath(path)):
+                r = QMessageBox.question(
+                    self, "確認",
+                    "このシーンは現在 Maya で開かれています。\n"
+                    "ディスク上のファイルを直接書き換えても開いているシーンには反映されず、\n"
+                    "そのシーンを保存すると編集が上書きされます。続行しますか？",
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if r != QMessageBox.Yes:
+                    return
+        except ImportError:
+            pass
+
+        refs = self._parse_ma_references(path)
+        if not refs:
+            QMessageBox.information(
+                self, "リファレンス編集",
+                f"{Path(path).name} に編集できるリファレンスは見つかりませんでした。",
+            )
+            return
+
+        dlg = ReferenceEditDialog(path, refs, self)
+        ok = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
+        if not ok:
+            return
+        mapping = dlg.mapping()
+        if not mapping:
+            self.statusLabel.setText("リファレンスの変更はありません")
+            return
+        try:
+            backup, n = self._rewrite_ma_references(path, mapping)
         except Exception as e:
-            self.statusLabel.setText(f"⚠  Reference Editor を開けませんでした: {e}")
+            QMessageBox.warning(self, "保存失敗", f"書き換えに失敗しました:\n{e}")
+            return
+        self.statusLabel.setText(
+            f"✓  リファレンス更新: {n} 行を書き換え  (バックアップ: {Path(backup).name})"
+        )
 
     @staticmethod
     def _parse_ma_references(path):
-        """.ma テキストから参照ファイルのパス一覧を抽出する（読み取り専用）。"""
+        """.ma テキストから参照ファイルのパス一覧を抽出する（重複除去）。"""
         refs = []
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -1338,23 +1429,43 @@ class OGPipelineWindow(QWidget):
             pass
         return refs
 
-    def _show_reference_list_standalone(self, path):
-        ext = Path(path).suffix.lower()
-        if ext == ".mb":
-            QMessageBox.information(
-                self, "リファレンス（スタンドアロン）",
-                "Maya バイナリ(.mb)はスタンドアロンでは解析できません。\n"
-                "Maya 内で実行すると、シーンを開いて Reference Editor を表示します。",
-            )
-            return
-        refs = self._parse_ma_references(path)
-        if refs:
-            body = "\n".join(f"・{r}" for r in refs)
-            msg = f"{Path(path).name} のリファレンス（{len(refs)} 件・参照のみ）:\n\n{body}\n\n" \
-                  "編集（リパス等）は Maya 内で開いて Reference Editor を使用してください。"
-        else:
-            msg = f"{Path(path).name} にリファレンスは見つかりませんでした。"
-        QMessageBox.information(self, "リファレンス一覧（スタンドアロン）", msg)
+    @staticmethod
+    def _rewrite_ma_references(path, mapping):
+        """.ma の参照行のパスを mapping に従って置換し、保存する。
+
+        改行コードはそのまま維持。書き換え前にタイムスタンプ付きバックアップを作成。
+        戻り値: (バックアップパス, 置換した行数)。
+        """
+        import shutil
+        import datetime
+
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            content = f.read()
+
+        count = 0
+        out_parts = []
+        for line in content.splitlines(keepends=True):
+            s = line.strip()
+            if s.startswith("file ") and re.search(r"\s-r(di)?\b", s):
+                quoted = re.findall(r'"((?:[^"\\]|\\.)*)"', line)
+                if quoted:
+                    old_token = quoted[-1]
+                    old_unesc = old_token.replace('\\"', '"')
+                    if old_unesc in mapping:
+                        new_token = mapping[old_unesc].replace('"', '\\"')
+                        needle = '"' + old_token + '"'
+                        idx = line.rfind(needle)
+                        if idx != -1:
+                            line = line[:idx] + '"' + new_token + '"' + line[idx + len(needle):]
+                            count += 1
+            out_parts.append(line)
+
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = f"{path}.{ts}.bak"
+        shutil.copy2(path, backup)
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write("".join(out_parts))
+        return backup, count
 
     # ════════════════════════════════════════════════════════════════════
     #  Maya アクション
