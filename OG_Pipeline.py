@@ -586,6 +586,56 @@ class ColumnBrowser(QWidget):
         if self.root and self.root.exists():
             self._add_column(self.root)
 
+    def reveal_path(self, target):
+        """root から target（ファイル/フォルダ）までカラムを展開し、末尾を選択する。
+
+        戻り値: 到達できれば True。target が root 配下に無ければ False。
+        """
+        if not self.root:
+            return False
+        target = Path(target)
+        try:
+            rel = target.relative_to(self.root)
+        except ValueError:
+            return False  # ルート配下ではない
+
+        # 検索フィルタは解除して通常表示で潜る
+        self._allowed_files = None
+        self._allowed_dirs = None
+        self._clear_columns()
+        self._add_column(self.root)
+
+        for part in rel.parts:
+            lw = self._columns[-1]
+            item = self._find_item(lw, part)
+            if item is None:
+                return False
+            lw.setCurrentItem(item)
+            item.setSelected(True)
+            kind, path = item.data(Qt.UserRole)
+            if kind == "dir":
+                self._add_column(Path(path))
+            else:
+                self.file_selected.emit(self._file_info(path))
+                break
+
+        # 末尾カラムが見えるよう右へスクロール
+        if self._columns:
+            last = self._columns[-1]._container
+            QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(last))
+        return True
+
+    @staticmethod
+    def _find_item(lw, name):
+        """カラム内で、保存パスの末尾名が name に一致する項目を返す（大文字小文字無視）。"""
+        target = name.lower()
+        for i in range(lw.count()):
+            it = lw.item(i)
+            data = it.data(Qt.UserRole)
+            if data and Path(data[1]).name.lower() == target:
+                return it
+        return None
+
     # ── 内部処理 ──────────────────────────────────────────────
     def _clear_columns(self):
         for w in self._columns:
@@ -910,6 +960,12 @@ class OGPipelineWindow(QWidget):
         sep.setStyleSheet("color: #1e2435;")
         layout.addWidget(sep)
 
+        self.gotoCurrentBtn = QPushButton("◎  現在のシーン")
+        self.gotoCurrentBtn.setObjectName("refreshBtn")
+        self.gotoCurrentBtn.setToolTip("現在開いているシーンの保存先フォルダまでカラムを展開する")
+        self.gotoCurrentBtn.clicked.connect(self._goto_current_scene)
+        layout.addWidget(self.gotoCurrentBtn)
+
         self.refreshBtn = QPushButton("↻  REFRESH")
         self.refreshBtn.setObjectName("refreshBtn")
         self.refreshBtn.clicked.connect(self._apply_view)
@@ -1173,6 +1229,33 @@ class OGPipelineWindow(QWidget):
     def _open_path(self, path):
         self._selected_path = path
         self._open_scene()
+
+    def _goto_current_scene(self):
+        """現在開いているシーンの保存先フォルダまでカラムを展開して選択する。"""
+        try:
+            import maya.cmds as cmds
+            cur = cmds.file(q=True, sceneName=True)
+        except ImportError:
+            cur = ""  # スタンドアロン
+        if not cur:
+            self.statusLabel.setText("現在のシーンは未保存です（保存先がありません）")
+            return
+        if not self.active_root:
+            self.statusLabel.setText("ルートが選択されていません")
+            return
+
+        # 検索中なら通常表示へ戻す
+        if self.searchBar.text():
+            self.searchBar.blockSignals(True)
+            self.searchBar.clear()
+            self.searchBar.blockSignals(False)
+
+        if self.browser.reveal_path(cur):
+            self.statusLabel.setText(f"◎  現在のシーン: {Path(cur).name}")
+        else:
+            self.statusLabel.setText(
+                f"⚠  現在のシーンはこのルート配下にありません: {cur}"
+            )
 
     # ════════════════════════════════════════════════════════════════════
     #  Maya アクション
