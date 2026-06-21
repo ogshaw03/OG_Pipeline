@@ -31,7 +31,7 @@ try:
         QSplitter, QFrame, QScrollArea, QComboBox, QMessageBox,
         QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
         QListWidget, QListWidgetItem, QInputDialog, QMenu,
-        QDialog, QDialogButtonBox, QGridLayout
+        QDialog, QDialogButtonBox, QGridLayout, QCheckBox
     )
 except ImportError:
     try:
@@ -44,7 +44,7 @@ except ImportError:
             QSplitter, QFrame, QScrollArea, QComboBox, QMessageBox,
             QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
             QListWidget, QListWidgetItem, QInputDialog, QMenu,
-            QDialog, QDialogButtonBox, QGridLayout
+            QDialog, QDialogButtonBox, QGridLayout, QCheckBox
         )
     except ImportError:
         raise ImportError("PySide2 または PySide6 が必要です。")
@@ -828,12 +828,13 @@ QScrollArea { border:none; }
 class ReferenceEditDialog(QDialog):
     """シーンを開かずに .ma のリファレンスを編集する（Reference Editor 風の表表示）。
 
-    refinfos: [{'path','namespace','refnode','type'}, ...]
+    refinfos: [{'path','namespace','refnode','type','unloaded'}, ...]
+    各行: 選択 / Reference Node / Namespace / Unload / Type / File Path / 参照 / Remove
     """
     def __init__(self, file_path, refinfos, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Reference Editor — " + Path(file_path).name)
-        self.setMinimumSize(820, 460)
+        self.setMinimumSize(900, 480)
         self.setStyleSheet(REF_DIALOG_STYLE)
         self._rows = []
 
@@ -849,17 +850,23 @@ class ReferenceEditDialog(QDialog):
         sub.setWordWrap(True)
         outer.addWidget(sub)
 
-        # 一括置換バー（パス内の部分文字列を全行まとめて置換）
+        # 一括置換バー（選択行のパス内文字列を置換。未選択なら全行）
         repl_bar = QWidget()
         rb = QHBoxLayout(repl_bar)
         rb.setContentsMargins(10, 6, 10, 6)
         rb.setSpacing(6)
-        rb.addWidget(QLabel("パス一括置換:"))
+        sel_all = QPushButton("全選択/解除")
+        sel_all.clicked.connect(self._toggle_select_all)
+        rb.addWidget(sel_all)
+        rb.addWidget(QLabel("パス置換:"))
         self._findEdit = QLineEdit()
         self._findEdit.setPlaceholderText("検索（例: D:/Animation）")
+        self._findEdit.returnPressed.connect(self._apply_replace)
         self._replEdit = QLineEdit()
         self._replEdit.setPlaceholderText("置換後（例: N:/Animation）")
-        apply_btn = QPushButton("置換を適用")
+        self._replEdit.returnPressed.connect(self._apply_replace)
+        apply_btn = QPushButton("選択行に置換")
+        apply_btn.setAutoDefault(False)
         apply_btn.clicked.connect(self._apply_replace)
         rb.addWidget(self._findEdit, 1)
         rb.addWidget(QLabel("→"))
@@ -867,54 +874,69 @@ class ReferenceEditDialog(QDialog):
         rb.addWidget(apply_btn)
         outer.addWidget(repl_bar)
 
+        cols = ["", "Reference Node", "Namespace", "Unload", "Type", "File Path", "", "Remove"]
+        widths = [28, 150, 110, 56, 44, 0, 64, 60]
+
         # 列ヘッダ
         head = QWidget()
         head.setObjectName("refHeadRow")
         hg = QGridLayout(head)
         hg.setContentsMargins(10, 0, 10, 0)
-        hg.setHorizontalSpacing(10)
-        for c, h in enumerate(["Reference Node", "Namespace", "Type", "File Path", ""]):
+        hg.setHorizontalSpacing(8)
+        for c, h in enumerate(cols):
             lab = QLabel(h)
             lab.setObjectName("refHead")
             hg.addWidget(lab, 0, c)
-        hg.setColumnMinimumWidth(0, 150)
-        hg.setColumnMinimumWidth(1, 110)
-        hg.setColumnMinimumWidth(2, 40)
-        hg.setColumnStretch(3, 1)
-        hg.setColumnMinimumWidth(4, 64)
+        for c, w in enumerate(widths):
+            if w:
+                hg.setColumnMinimumWidth(c, w)
+        hg.setColumnStretch(5, 1)
         outer.addWidget(head)
 
         # 行（スクロール内）
         content = QWidget()
         grid = QGridLayout(content)
         grid.setContentsMargins(10, 6, 10, 6)
-        grid.setHorizontalSpacing(10)
+        grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(6)
-        grid.setColumnMinimumWidth(0, 150)
-        grid.setColumnMinimumWidth(1, 110)
-        grid.setColumnMinimumWidth(2, 40)
-        grid.setColumnStretch(3, 1)
-        grid.setColumnMinimumWidth(4, 64)
+        for c, w in enumerate(widths):
+            if w:
+                grid.setColumnMinimumWidth(c, w)
+        grid.setColumnStretch(5, 1)
 
         for r, info in enumerate(refinfos):
+            sel = QCheckBox()
+            sel.setToolTip("一括置換の対象に含める")
             node = QLabel(info.get("refnode") or "—")
             node.setObjectName("refNode")
             ns_edit = QLineEdit(info.get("namespace", ""))
             ns_edit.setObjectName("refNs")
             ns_edit.setToolTip("ネームスペース（-ns）。書き換え可能")
+            unload = QCheckBox()
+            unload.setChecked(bool(info.get("unloaded")))
+            unload.setToolTip("チェックでアンロード（-dr 1）／外すとロード（-dr 0）")
             typ = QLabel(self._short_type(info.get("type", "")))
             typ.setObjectName("refType")
             path_edit = QLineEdit(info["path"])
             path_edit.setToolTip(info["path"])
             browse = QPushButton("参照…")
             browse.setFixedWidth(64)
+            browse.setAutoDefault(False)
             browse.clicked.connect(lambda _=False, e=path_edit: self._browse(e))
-            grid.addWidget(node, r, 0)
-            grid.addWidget(ns_edit, r, 1)
-            grid.addWidget(typ, r, 2)
-            grid.addWidget(path_edit, r, 3)
-            grid.addWidget(browse, r, 4)
-            self._rows.append((info, path_edit, ns_edit))
+            remove = QCheckBox()
+            remove.setToolTip("チェックで保存時にこのリファレンスを削除")
+            remove.toggled.connect(lambda checked, pe=path_edit, ne=ns_edit:
+                                   (pe.setEnabled(not checked), ne.setEnabled(not checked)))
+            grid.addWidget(sel, r, 0)
+            grid.addWidget(node, r, 1)
+            grid.addWidget(ns_edit, r, 2)
+            grid.addWidget(unload, r, 3, Qt.AlignCenter)
+            grid.addWidget(typ, r, 4)
+            grid.addWidget(path_edit, r, 5)
+            grid.addWidget(browse, r, 6)
+            grid.addWidget(remove, r, 7, Qt.AlignCenter)
+            self._rows.append({"info": info, "sel": sel, "ns": ns_edit,
+                               "unload": unload, "path": path_edit, "remove": remove})
         grid.setRowStretch(len(refinfos), 1)
 
         scroll = QScrollArea()
@@ -929,6 +951,10 @@ class ReferenceEditDialog(QDialog):
         hint.setObjectName("refSub")
         fl.addWidget(hint, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        for b in (buttons.button(QDialogButtonBox.Save), buttons.button(QDialogButtonBox.Cancel)):
+            if b:
+                b.setAutoDefault(False)   # Enter でダイアログが閉じないように
+                b.setDefault(False)
         save_btn = buttons.button(QDialogButtonBox.Save)
         if save_btn:
             save_btn.setText("Replace（保存）")
@@ -936,6 +962,13 @@ class ReferenceEditDialog(QDialog):
         buttons.rejected.connect(self.reject)
         fl.addWidget(buttons)
         outer.addWidget(foot)
+
+    def keyPressEvent(self, event):
+        # Enter/Return ではダイアログを閉じない（誤操作防止）
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     @staticmethod
     def _short_type(t):
@@ -949,41 +982,59 @@ class ReferenceEditDialog(QDialog):
         if fp:
             edit.setText(fp)
 
+    def _toggle_select_all(self):
+        new_state = not all(r["sel"].isChecked() for r in self._rows) if self._rows else True
+        for r in self._rows:
+            r["sel"].setChecked(new_state)
+
     def _apply_replace(self):
-        """全リファレンスのパス欄に対し、検索文字列を置換文字列で一括置換する。"""
+        """選択行（無ければ全行）のパス欄で、検索文字列を置換文字列に置き換える。"""
         find = self._findEdit.text()
         if not find:
             return
         repl = self._replEdit.text()
+        targets = [r for r in self._rows if r["sel"].isChecked()] or list(self._rows)
         changed = 0
-        for _info, path_edit, _ns_edit in self._rows:
-            cur = path_edit.text()
+        for r in targets:
+            cur = r["path"].text()
             new = cur.replace(find, repl)
             if new != cur:
-                path_edit.setText(new)
+                r["path"].setText(new)
                 changed += 1
         self.setWindowTitle(f"Reference Editor — {changed} 件のパスを置換")
 
     def changes(self):
-        """変更のあった参照のみ、変更内容のリストを返す。
+        """変更（パス/ネームスペース/アンロード/削除）のあった参照のリストを返す。
 
-        各要素: {refnode, old_path, new_path, old_ns, new_ns}
+        各要素: {refnode, old_path, new_path, old_ns, new_ns,
+                 old_unload, new_unload, remove}
         """
         out = []
-        for info, path_edit, ns_edit in self._rows:
-            new_path = path_edit.text().strip()
-            new_ns = ns_edit.text().strip()
+        for r in self._rows:
+            info = r["info"]
             old_path = info["path"]
             old_ns = info.get("namespace", "")
-            if (new_path and new_path != old_path) or (new_ns != old_ns):
+            old_unload = bool(info.get("unloaded"))
+            new_path = r["path"].text().strip()
+            new_ns = r["ns"].text().strip()
+            new_unload = r["unload"].isChecked()
+            remove = r["remove"].isChecked()
+            if remove or (new_path and new_path != old_path) or (new_ns != old_ns) \
+                    or (new_unload != old_unload):
                 out.append({
                     "refnode": info.get("refnode", ""),
                     "old_path": old_path,
                     "new_path": new_path or old_path,
                     "old_ns": old_ns,
                     "new_ns": new_ns,
+                    "old_unload": old_unload,
+                    "new_unload": new_unload,
+                    "remove": remove,
                 })
         return out
+
+    def remove_count(self):
+        return sum(1 for r in self._rows if r["remove"].isChecked())
 
 
 # ─── メインウィンドウ ─────────────────────────────────────────────────────────
@@ -1520,20 +1571,38 @@ class OGPipelineWindow(QWidget):
         if not changes:
             self.statusLabel.setText("リファレンスの変更はありません")
             return
+        n_remove = dlg.remove_count()
+        if n_remove:
+            r = QMessageBox.question(
+                self, "リファレンス削除の確認",
+                f"{n_remove} 件のリファレンスを .ma から削除します。\n"
+                "（バックアップは作成されます）よろしいですか？",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if r != QMessageBox.Yes:
+                return
         try:
-            backup, n = self._rewrite_ma_references(path, changes)
+            backup, n, removed = self._rewrite_ma_references(path, changes)
         except Exception as e:
             QMessageBox.warning(self, "保存失敗", f"書き換えに失敗しました:\n{e}")
             return
-        self.statusLabel.setText(
-            f"✓  リファレンス更新: {n} 行を書き換え  (バックアップ: {Path(backup).name})"
-        )
+        msg = f"✓  リファレンス更新: {n} 件"
+        if removed:
+            msg += f" / 削除: {removed} 件"
+        msg += f"  (バックアップ: {Path(backup).name})"
+        self.statusLabel.setText(msg)
 
     @staticmethod
     def _ma_flag(s, flag):
         """file 行から -ns/-rfn/-typ などのフラグ値（直後の引用文字列）を取り出す。"""
         m = re.search(re.escape(flag) + r'\s+"((?:[^"\\]|\\.)*)"', s)
         return m.group(1).replace('\\"', '"') if m else ""
+
+    @staticmethod
+    def _ma_flag_num(s, flag):
+        """-dr 1 のような引用なし数値フラグの値を返す（無ければ None）。"""
+        m = re.search(re.escape(flag) + r'\s+(-?\d+)\b', s)
+        return int(m.group(1)) if m else None
 
     # 値を取るフラグ（この直後の引用トークンはパスではなく値）
     _REF_VALUE_FLAGS = {"-ns", "-rfn", "-typ", "-op", "-rdn", "-pmt", "-rpr",
@@ -1627,12 +1696,14 @@ class OGPipelineWindow(QWidget):
             ns = cls._ma_flag(text, "-ns")
             rfn = cls._ma_flag(text, "-rfn")
             typ = cls._ma_flag(text, "-typ")
+            dr = cls._ma_flag_num(text, "-dr")   # アンロード状態（-dr 1 = unloaded）
             if not rfn and not p:
                 continue
             key = ("rfn:" + rfn) if rfn else ("path:" + p)
             if key not in seen:
                 info = {"key": key, "path": p, "namespace": ns,
-                        "refnode": rfn, "type": typ}
+                        "refnode": rfn, "type": typ,
+                        "unloaded": (dr == 1)}
                 seen[key] = info
                 infos.append(info)
             else:
@@ -1640,32 +1711,56 @@ class OGPipelineWindow(QWidget):
                 info["namespace"] = info["namespace"] or ns
                 info["type"] = info["type"] or typ
                 info["path"] = info["path"] or p
+                if dr is not None:        # -dr は -r 文にのみ付く。その値を採用
+                    info["unloaded"] = (dr == 1)
         return infos
+
+    @staticmethod
+    def _set_dr(text, value):
+        """参照文の -dr の値を value(0/1)に設定。無ければ file -r の直後に挿入。"""
+        if re.search(r'-dr\s+-?\d+\b', text):
+            return re.sub(r'-dr\s+-?\d+', '-dr %d' % value, text, count=1)
+        return re.sub(r'(\bfile\s+-r\b)', r'\1 -dr %d' % value, text, count=1)
 
     @classmethod
     def _rewrite_ma_references(cls, path, changes):
-        """.ma の参照文を changes に従って書き換える（パス＋ネームスペース）。
+        """.ma の参照文を changes に従って書き換える（パス/ns/アンロード/削除）。
 
         複数行にまたがる file 文にも対応。各文は refNode（無ければパス）で対象判定。
         改行コードは維持し、書き換え前にタイムスタンプ付きバックアップを作成する。
-        戻り値: (バックアップパス, 変更した参照数)。
+        戻り値: (バックアップパス, 変更した参照数, 削除した参照数)。
         """
         import shutil
         import datetime
 
-        by_refnode = {c["refnode"]: c for c in changes if c.get("refnode")}
-        by_path = {c["old_path"]: c for c in changes if not c.get("refnode")}
+        remove_rfns = {c["refnode"] for c in changes if c.get("remove") and c.get("refnode")}
+        remove_paths = {c["old_path"] for c in changes if c.get("remove") and not c.get("refnode")}
+        by_refnode = {c["refnode"]: c for c in changes
+                      if c.get("refnode") and not c.get("remove")}
+        by_path = {c["old_path"]: c for c in changes
+                   if not c.get("refnode") and not c.get("remove")}
 
         with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
             content = f.read()
 
         count = 0
+        removed_rfns_seen = set()
+        removed_paths_seen = set()
         out_parts = []
         for is_ref, text in cls._split_ref_statements(content):
             if is_ref:
                 rfn = cls._ma_flag(text, "-rfn")
                 pm = cls._ref_path_match(text)
                 old_path = pm.group(0)[1:-1].replace('\\"', '"') if pm else None
+
+                # 削除対象（refNode 一致、または refNode 無しでパス一致）→ 文ごと破棄
+                if (rfn and rfn in remove_rfns) or (not rfn and old_path in remove_paths):
+                    if rfn:
+                        removed_rfns_seen.add(rfn)
+                    elif old_path:
+                        removed_paths_seen.add(old_path)
+                    continue
+
                 ch = by_refnode.get(rfn) if rfn else (by_path.get(old_path) if old_path else None)
                 if ch:
                     changed = False
@@ -1678,6 +1773,10 @@ class OGPipelineWindow(QWidget):
                         if new_text != text:
                             text = new_text
                             changed = True
+                    # アンロード（-dr）は実体の file -r 文にのみ設定する
+                    if ch.get("new_unload") != ch.get("old_unload") and re.match(r'\s*file\s+-r\b', text):
+                        text = cls._set_dr(text, 1 if ch["new_unload"] else 0)
+                        changed = True
                     if changed:
                         count += 1
             out_parts.append(text)
@@ -1687,7 +1786,8 @@ class OGPipelineWindow(QWidget):
         shutil.copy2(path, backup)
         with open(path, "w", encoding="utf-8", newline="") as f:
             f.write("".join(out_parts))
-        return backup, count
+        removed = len(removed_rfns_seen) + len(removed_paths_seen)
+        return backup, count, removed
 
     @staticmethod
     def _replace_flag(line, flag, new_value):
