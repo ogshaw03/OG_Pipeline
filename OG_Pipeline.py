@@ -849,6 +849,24 @@ class ReferenceEditDialog(QDialog):
         sub.setWordWrap(True)
         outer.addWidget(sub)
 
+        # 一括置換バー（パス内の部分文字列を全行まとめて置換）
+        repl_bar = QWidget()
+        rb = QHBoxLayout(repl_bar)
+        rb.setContentsMargins(10, 6, 10, 6)
+        rb.setSpacing(6)
+        rb.addWidget(QLabel("パス一括置換:"))
+        self._findEdit = QLineEdit()
+        self._findEdit.setPlaceholderText("検索（例: D:/Animation）")
+        self._replEdit = QLineEdit()
+        self._replEdit.setPlaceholderText("置換後（例: N:/Animation）")
+        apply_btn = QPushButton("置換を適用")
+        apply_btn.clicked.connect(self._apply_replace)
+        rb.addWidget(self._findEdit, 1)
+        rb.addWidget(QLabel("→"))
+        rb.addWidget(self._replEdit, 1)
+        rb.addWidget(apply_btn)
+        outer.addWidget(repl_bar)
+
         # 列ヘッダ
         head = QWidget()
         head.setObjectName("refHeadRow")
@@ -930,6 +948,21 @@ class ReferenceEditDialog(QDialog):
         )
         if fp:
             edit.setText(fp)
+
+    def _apply_replace(self):
+        """全リファレンスのパス欄に対し、検索文字列を置換文字列で一括置換する。"""
+        find = self._findEdit.text()
+        if not find:
+            return
+        repl = self._replEdit.text()
+        changed = 0
+        for _info, path_edit, _ns_edit in self._rows:
+            cur = path_edit.text()
+            new = cur.replace(find, repl)
+            if new != cur:
+                path_edit.setText(new)
+                changed += 1
+        self.setWindowTitle(f"Reference Editor — {changed} 件のパスを置換")
 
     def changes(self):
         """変更のあった参照のみ、変更内容のリストを返す。
