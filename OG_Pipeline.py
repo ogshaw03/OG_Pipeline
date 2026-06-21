@@ -1502,22 +1502,42 @@ class OGPipelineWindow(QWidget):
         m = re.search(re.escape(flag) + r'\s+"((?:[^"\\]|\\.)*)"', s)
         return m.group(1).replace('\\"', '"') if m else ""
 
-    @staticmethod
-    def _ref_path_match(line):
-        """file 行で「フラグの値ではない」引用トークン＝参照パスの Match を返す。
+    # 値を取るフラグ（この直後の引用トークンはパスではなく値）
+    _REF_VALUE_FLAGS = {"-ns", "-rfn", "-typ", "-op", "-rdn", "-pmt", "-rpr",
+                        "-namespace", "-referenceNode", "-type", "-options"}
 
-        例: `file -rdi 1 -ns "ns" -rfn "nsRN" -typ "mayaAscii" "path.ma";`
-            → "path.ma"（-typ の値 "mayaAscii" は直前が -typ なので除外）。
-        パスを持たない -rdi 行（末尾が -typ "mayaAscii" 等）では None。
+    @classmethod
+    def _ref_path_match(cls, line):
+        """file 行から参照パスの引用トークン（Match）を返す。無ければ None。
+
+        判定: ①直前トークンが「値を取るフラグ」でない引用トークン（位置引数）を優先。
+              ②それが無い場合、パスらしい引用トークン（/ や \\、.ma/.mb 等の拡張子を含む）
+                にフォールバック。
+        例: `file -rdi 1 -ns "ns" -rfn "nsRN" -typ "mayaAscii" "path.ma";` → "path.ma"
+            パスを持たない -rdi 行（末尾が -typ "mayaAscii" 等）では None。
         """
-        best = None
-        for m in re.finditer(r'"(?:[^"\\]|\\.)*"', line):
-            before = line[:m.start()].rstrip()
-            toks = before.split()
+        matches = list(re.finditer(r'"(?:[^"\\]|\\.)*"', line))
+
+        def looks_path(m):
+            v = m.group(0)[1:-1]
+            return ("/" in v or "\\" in v
+                    or re.search(r"\.(ma|mb|abc|fbx|obj|usd[acz]?)$", v, re.IGNORECASE) is not None)
+
+        positional = []
+        for m in matches:
+            toks = line[:m.start()].rstrip().split()
             prev = toks[-1] if toks else ""
-            if not prev.startswith("-"):   # 直前がフラグでない＝位置引数（パス）
-                best = m
-        return best
+            if prev not in cls._REF_VALUE_FLAGS:
+                positional.append(m)
+
+        path_like_pos = [m for m in positional if looks_path(m)]
+        if path_like_pos:
+            return path_like_pos[-1]
+        if positional:
+            return positional[-1]
+        # フォールバック: パスらしい引用トークンの最後（フラグ値判定が外れた場合の保険）
+        path_like_any = [m for m in matches if looks_path(m)]
+        return path_like_any[-1] if path_like_any else None
 
     @classmethod
     def _ref_path(cls, line):
