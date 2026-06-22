@@ -874,8 +874,8 @@ class ReferenceEditDialog(QDialog):
         rb.addWidget(apply_btn)
         outer.addWidget(repl_bar)
 
-        cols = ["", "Reference Node", "Namespace", "Unload", "Type", "File Path", "", "Remove"]
-        widths = [28, 150, 110, 56, 44, 0, 64, 60]
+        cols = ["", "Reference Node", "Namespace", "Load", "Type", "File Path", "", "Remove"]
+        widths = [28, 150, 110, 48, 44, 0, 64, 60]
 
         # 列ヘッダ
         head = QWidget()
@@ -912,9 +912,9 @@ class ReferenceEditDialog(QDialog):
             ns_edit = QLineEdit(info.get("namespace", ""))
             ns_edit.setObjectName("refNs")
             ns_edit.setToolTip("ネームスペース（-ns）。書き換え可能")
-            unload = QCheckBox()
-            unload.setChecked(bool(info.get("unloaded")))
-            unload.setToolTip("チェックでアンロード（-dr 1）／外すとロード（-dr 0）")
+            load_cb = QCheckBox()
+            load_cb.setChecked(not bool(info.get("unloaded")))
+            load_cb.setToolTip("Maya の Reference Editor と同じ：チェック＝ロード／外す＝アンロード")
             typ = QLabel(self._short_type(info.get("type", "")))
             typ.setObjectName("refType")
             path_edit = QLineEdit(info["path"])
@@ -930,13 +930,13 @@ class ReferenceEditDialog(QDialog):
             grid.addWidget(sel, r, 0)
             grid.addWidget(node, r, 1)
             grid.addWidget(ns_edit, r, 2)
-            grid.addWidget(unload, r, 3, Qt.AlignCenter)
+            grid.addWidget(load_cb, r, 3, Qt.AlignCenter)
             grid.addWidget(typ, r, 4)
             grid.addWidget(path_edit, r, 5)
             grid.addWidget(browse, r, 6)
             grid.addWidget(remove, r, 7, Qt.AlignCenter)
             self._rows.append({"info": info, "sel": sel, "ns": ns_edit,
-                               "unload": unload, "path": path_edit, "remove": remove})
+                               "load": load_cb, "path": path_edit, "remove": remove})
         grid.setRowStretch(len(refinfos), 1)
 
         scroll = QScrollArea()
@@ -1017,7 +1017,7 @@ class ReferenceEditDialog(QDialog):
             old_unload = bool(info.get("unloaded"))
             new_path = r["path"].text().strip()
             new_ns = r["ns"].text().strip()
-            new_unload = r["unload"].isChecked()
+            new_unload = not r["load"].isChecked()   # Load チェック→ロード, 外す→アンロード
             remove = r["remove"].isChecked()
             if remove or (new_path and new_path != old_path) or (new_ns != old_ns) \
                     or (new_unload != old_unload):
@@ -1696,14 +1696,16 @@ class OGPipelineWindow(QWidget):
             ns = cls._ma_flag(text, "-ns")
             rfn = cls._ma_flag(text, "-rfn")
             typ = cls._ma_flag(text, "-typ")
-            dr = cls._ma_flag_num(text, "-dr")   # アンロード状態（-dr 1 = unloaded）
+            is_rdi = re.match(r'\s*file\s+-rdi\b', text) is not None
+            # ロード/アンロードは -rdi 文の -dr で決まる（有=アンロード, 無=ロード）。
+            # -r 文の -dr は常に 1 で状態を表さないため無視する。
+            unloaded = is_rdi and (cls._ma_flag_num(text, "-dr") == 1)
             if not rfn and not p:
                 continue
             key = ("rfn:" + rfn) if rfn else ("path:" + p)
             if key not in seen:
                 info = {"key": key, "path": p, "namespace": ns,
-                        "refnode": rfn, "type": typ,
-                        "unloaded": (dr == 1)}
+                        "refnode": rfn, "type": typ, "unloaded": unloaded}
                 seen[key] = info
                 infos.append(info)
             else:
@@ -1711,16 +1713,28 @@ class OGPipelineWindow(QWidget):
                 info["namespace"] = info["namespace"] or ns
                 info["type"] = info["type"] or typ
                 info["path"] = info["path"] or p
-                if dr is not None:        # -dr は -r 文にのみ付く。その値を採用
-                    info["unloaded"] = (dr == 1)
+                if is_rdi:    # 状態は -rdi 文から採用
+                    info["unloaded"] = unloaded
         return infos
 
     @staticmethod
-    def _set_dr(text, value):
-        """参照文の -dr の値を value(0/1)に設定。無ければ file -r の直後に挿入。"""
-        if re.search(r'-dr\s+-?\d+\b', text):
-            return re.sub(r'-dr\s+-?\d+', '-dr %d' % value, text, count=1)
-        return re.sub(r'(\bfile\s+-r\b)', r'\1 -dr %d' % value, text, count=1)
+    def _set_rdi_unloaded(text, unloaded):
+        """-rdi 文のロード状態を設定する。
+
+        アンロード = -dr 1 を付与（Maya は -rfn の直前に置く）。
+        ロード = -dr フラグを除去。-r 文側は変更しない（常に -dr 1 のまま）。
+        """
+        has_dr = re.search(r'-dr\s+-?\d+\b', text) is not None
+        if unloaded:
+            if has_dr:
+                return re.sub(r'-dr\s+-?\d+', '-dr 1', text, count=1)
+            if re.search(r'\s-rfn\b', text):
+                return re.sub(r'(\s)(-rfn\b)', r'\g<1>-dr 1 \g<2>', text, count=1)
+            return re.sub(r'(\bfile\s+-rdi\s+\d+)', r'\1 -dr 1', text, count=1)
+        # ロード: -dr フラグを取り除く
+        if has_dr:
+            return re.sub(r'\s*-dr\s+-?\d+', '', text, count=1)
+        return text
 
     @classmethod
     def _rewrite_ma_references(cls, path, changes):
@@ -1773,9 +1787,9 @@ class OGPipelineWindow(QWidget):
                         if new_text != text:
                             text = new_text
                             changed = True
-                    # アンロード（-dr）は実体の file -r 文にのみ設定する
-                    if ch.get("new_unload") != ch.get("old_unload") and re.match(r'\s*file\s+-r\b', text):
-                        text = cls._set_dr(text, 1 if ch["new_unload"] else 0)
+                    # ロード/アンロードは -rdi 文の -dr 有無で表す（-r 文は触らない）
+                    if ch.get("new_unload") != ch.get("old_unload") and re.match(r'\s*file\s+-rdi\b', text):
+                        text = cls._set_rdi_unloaded(text, ch["new_unload"])
                         changed = True
                     if changed:
                         count += 1
