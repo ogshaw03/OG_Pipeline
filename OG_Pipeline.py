@@ -51,6 +51,7 @@ except ImportError:
 
 # ─── 定数 ────────────────────────────────────────────────────────────────────
 MAYA_EXTENSIONS = {".ma", ".mb"}
+WINDOW_OBJECT_NAME = "OGPipelineSceneOpenerWindow"   # 多重起動検出用の安定識別名
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1046,6 +1047,8 @@ class OGPipelineWindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.Window)
+        # 多重起動の検出に使う安定した識別名（reload してもクラスに依存しない）
+        self.setObjectName(WINDOW_OBJECT_NAME)
         self.setWindowTitle("OG_Pipeline — Scene Opener")
         self.setMinimumSize(1000, 680)
         self.resize(1240, 760)
@@ -2033,21 +2036,38 @@ def _get_maya_main_window():
     return None
 
 
+def _close_existing_windows():
+    """既存の OG_Pipeline ウィンドウを objectName で検出して閉じる。
+
+    importlib.reload するとクラスが再定義され isinstance では旧ウィンドウを
+    検出できないため、文字列の objectName で判定する（reload 耐性）。
+    戻り値: 閉じた数。
+    """
+    app = QApplication.instance()
+    if app is None:
+        return 0
+    closed = 0
+    for widget in app.topLevelWidgets():
+        try:
+            if widget.objectName() == WINDOW_OBJECT_NAME:
+                widget.close()
+                widget.deleteLater()
+                closed += 1
+        except Exception:
+            pass
+    return closed
+
+
 def main():
     """
     外部から呼び出す公開関数。
-    既にウィンドウが開いている場合は前面に移動する（多重起動防止）。
+    既存ウィンドウがあれば閉じてから1つだけ開く（多重起動・reload による重複を防止）。
     """
     if QApplication.instance() is None:
         print("[OG_Pipeline] エラー: Maya のスクリプトエディタから実行してください。")
         return None
 
-    for widget in QApplication.instance().topLevelWidgets():
-        if isinstance(widget, OGPipelineWindow):
-            widget.show()
-            widget.raise_()
-            widget.activateWindow()
-            return widget
+    _close_existing_windows()
 
     maya_main = _get_maya_main_window()
     win = OGPipelineWindow(parent=maya_main)
