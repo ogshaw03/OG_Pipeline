@@ -70,6 +70,9 @@ except Exception:
         _QT_MM = None
 
 
+SEQ_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".exr")
+
+
 def find_scene_video(scene_path):
     """シーンと同名の動画を movies フォルダから探す。無ければ None。"""
     if not scene_path:
@@ -80,6 +83,22 @@ def find_scene_video(scene_path):
         cand = folder / (p.stem + ext)
         if cand.exists():
             return str(cand)
+    return None
+
+
+def find_scene_sequence(scene_path):
+    """movies/<シーン名>/ 内の連番画像（ソート済みパスのリスト）を返す。無ければ None。"""
+    if not scene_path:
+        return None
+    p = Path(scene_path)
+    seq_dir = p.parent / VIDEO_SUBDIR / p.stem
+    if seq_dir.is_dir():
+        frames = sorted(
+            str(f) for f in seq_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in SEQ_EXTS
+        )
+        if frames:
+            return frames
     return None
 
 
@@ -467,6 +486,24 @@ class VideoPlayer(QWidget):
         self._placeholder.setMinimumHeight(150)
         lay.addWidget(self._placeholder)
 
+        # 連番画像のフリップブック再生用
+        self._frames = []
+        self._idx = 0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._next_frame)
+        self._frameLabel = QLabel()
+        self._frameLabel.setAlignment(Qt.AlignCenter)
+        self._frameLabel.setMinimumHeight(150)
+        self._frameLabel.setStyleSheet("background: #000;")
+        self._frameLabel.hide()
+        lay.addWidget(self._frameLabel)
+        self._counter = QLabel("")
+        self._counter.setAlignment(Qt.AlignCenter)
+        self._counter.setStyleSheet("color: #4a5568; font-size: 10px;")
+        self._counter.hide()
+        lay.addWidget(self._counter)
+
+        # 単一動画ファイル用（QtMultimedia がある場合）
         self._video = None
         self._player = None
         self._audio = None
@@ -494,6 +531,65 @@ class VideoPlayer(QWidget):
         self._openBtn.hide()
         lay.addWidget(self._openBtn)
 
+    # ── 共通 ──────────────────────────────────────────────
+    def _stop_all(self):
+        self._timer.stop()
+        if self._player:
+            try:
+                self._player.stop()
+            except Exception:
+                pass
+
+    def clear_player(self):
+        self._stop_all()
+        self._frames = []
+        self._path = None
+        self._frameLabel.hide()
+        self._counter.hide()
+        if self._video:
+            self._video.hide()
+        self._openBtn.hide()
+        self._placeholder.setText("動画なし（プレイブラスト未作成）")
+        self._placeholder.show()
+
+    # ── 連番画像（フリップブック） ─────────────────────────
+    def set_sequence(self, frames, fps=24):
+        self._stop_all()
+        self._path = None
+        self._frames = list(frames or [])
+        self._idx = 0
+        if self._video:
+            self._video.hide()
+        self._openBtn.hide()
+        if not self._frames:
+            self.clear_player()
+            return
+        self._placeholder.hide()
+        self._frameLabel.show()
+        self._counter.show()
+        self._show_frame(0)
+        if len(self._frames) > 1:
+            self._timer.start(max(1, int(1000 / max(1, fps))))
+
+    def _show_frame(self, i):
+        try:
+            pm = QPixmap(self._frames[i])
+            if not pm.isNull():
+                self._frameLabel.setPixmap(
+                    pm.scaled(self._frameLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                )
+            self._counter.setText(f"連番再生  {i + 1}/{len(self._frames)}")
+        except Exception:
+            pass
+
+    def _next_frame(self):
+        if not self._frames:
+            self._timer.stop()
+            return
+        self._idx = (self._idx + 1) % len(self._frames)
+        self._show_frame(self._idx)
+
+    # ── 単一動画ファイル ───────────────────────────────────
     def _loop_ps2(self, status):
         try:
             if status == QMediaPlayer.EndOfMedia and self._path:
@@ -503,18 +599,13 @@ class VideoPlayer(QWidget):
             pass
 
     def set_video(self, path):
+        self._stop_all()
+        self._frames = []
+        self._frameLabel.hide()
+        self._counter.hide()
         self._path = path
-        if self._player:
-            try:
-                self._player.stop()
-            except Exception:
-                pass
         if not path:
-            if self._video:
-                self._video.hide()
-            self._openBtn.hide()
-            self._placeholder.setText("動画なし（プレイブラスト未作成）")
-            self._placeholder.show()
+            self.clear_player()
             return
         if _QT_MM and self._player:
             self._placeholder.hide()
@@ -541,11 +632,7 @@ class VideoPlayer(QWidget):
             open_file_external(self._path)
 
     def stop(self):
-        if self._player:
-            try:
-                self._player.stop()
-            except Exception:
-                pass
+        self._stop_all()
 
 
 # ─── 詳細パネル ──────────────────────────────────────────────────────────────
@@ -594,11 +681,19 @@ class DetailPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+    def _show_media(self, abs_path):
+        """連番画像があればフリップブック再生、無ければ単一動画、どちらも無ければクリア。"""
+        seq = find_scene_sequence(abs_path)
+        if seq:
+            self.video.set_sequence(seq)
+        else:
+            self.video.set_video(find_scene_video(abs_path))
+
     def clear(self):
         self._clear_layout()
         self._abs_path = ""
         if hasattr(self, "video"):
-            self.video.set_video(None)
+            self.video.clear_player()
         placeholder = QLabel("ファイルを選択すると\n詳細が表示されます")
         placeholder.setStyleSheet("color: #2a3045; font-size: 11px;")
         placeholder.setAlignment(Qt.AlignCenter)
@@ -606,14 +701,14 @@ class DetailPanel(QWidget):
         self.contentLayout.addStretch()
 
     def reload_video(self):
-        """現在表示中シーンの動画を再探索して反映（プレイブラスト直後など）。"""
+        """現在表示中シーンの動画／連番を再探索して反映（プレイブラスト直後など）。"""
         if self._abs_path:
-            self.video.set_video(find_scene_video(self._abs_path))
+            self._show_media(self._abs_path)
 
     def update_info(self, rel_path: str, abs_path: str, size: int, mtime: float):
         self._abs_path = abs_path
         if hasattr(self, "video"):
-            self.video.set_video(find_scene_video(abs_path))
+            self._show_media(abs_path)
         self._clear_layout()
         import datetime
 
@@ -2164,34 +2259,32 @@ class OGPipelineWindow(QWidget):
             if os.path.normcase(os.path.normpath(cur)) != os.path.normcase(os.path.normpath(scene_path)):
                 return
 
-        import tempfile
         import shutil
 
-        folder = os.path.join(os.path.dirname(scene_path), VIDEO_SUBDIR)
+        stem = Path(scene_path).stem
+        # 連番画像はコーデック非依存で確実。movies/<シーン名>/ に出力する。
+        seq_dir = os.path.join(os.path.dirname(scene_path), VIDEO_SUBDIR, stem)
         try:
-            os.makedirs(folder, exist_ok=True)
+            if os.path.isdir(seq_dir):
+                shutil.rmtree(seq_dir, ignore_errors=True)   # 古いフレームを掃除
+            os.makedirs(seq_dir, exist_ok=True)
         except Exception as e:
-            self.statusLabel.setText(f"⚠  movies フォルダ作成失敗: {e}")
+            self.statusLabel.setText(f"⚠  出力フォルダ作成失敗: {e}")
             return
 
-        # 事前に空き容量を確認（"out of disk space" 回避の手がかり）
-        warn_low = []
-        for label, chk in (("出力先", folder), ("一時領域", tempfile.gettempdir())):
-            try:
-                free_mb = shutil.disk_usage(chk).free / (1024 * 1024)
-                if free_mb < 300:
-                    warn_low.append(f"{label} 残り {free_mb:.0f}MB")
-            except Exception:
-                pass
-        if warn_low:
-            r = QMessageBox.question(
-                self, "空き容量の警告",
-                "空き容量が少ないためプレイブラストが失敗する可能性があります:\n  "
-                + "\n  ".join(warn_low) + "\n\n続行しますか？",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if r != QMessageBox.Yes:
-                return
+        # 空き容量チェック
+        try:
+            free_mb = shutil.disk_usage(seq_dir).free / (1024 * 1024)
+            if free_mb < 200:
+                r = QMessageBox.question(
+                    self, "空き容量の警告",
+                    f"出力先の空きが残り {free_mb:.0f}MB です。続行しますか？",
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if r != QMessageBox.Yes:
+                    return
+        except Exception:
+            pass
 
         try:
             width = int(cmds.getAttr("defaultResolution.width"))
@@ -2201,94 +2294,38 @@ class OGPipelineWindow(QWidget):
         except Exception:
             width, height = 1280, 720
 
-        # まずローカル一時フォルダにエンコードし、完成後に movies へコピーする。
-        # （出力先ドライブ直書きで起きる "out of disk space"/"copy to final
-        #   destination" を切り分け・回避できる）
-        tmpdir = tempfile.mkdtemp(prefix="ogpb_")
-        tmp_base = os.path.join(tmpdir, Path(scene_path).stem).replace("\\", "/")
-
-        # 利用可能なフォーマット／コーデックを実行時に問い合わせて決める。
-        # QuickTime 非搭載の環境では qt(.mov) が使えないため avi を主とする。
-        try:
-            supported = set(cmds.playblast(q=True, format=True) or [])
-        except Exception:
-            supported = set()
-        try:
-            comps = cmds.playblast(q=True, compression=True) or []
-        except Exception:
-            comps = []
-
-        def _pick(tokens):
-            for t in tokens:
-                for c in comps:
-                    if t.lower() in c.lower():
-                        return c
-            return None
-
-        # avi コーデックの優先順位: 圧縮でき再生互換の高いものから（ローカライズ名対応）
-        avi_codec = _pick(["MS-CRAM", "Video 1", "CRAM", "IYUV",
-                           "MS-YUV", "Toshiba", "YUV", "none", "MS-RLE", "RLE"])
-
-        attempts = []
-        if avi_codec:
-            attempts.append(("avi", avi_codec))
-        attempts += [("avi", None), ("movie", None)]
-        # qt は最後（多くの Windows 環境では QuickTime 非搭載で失敗する）
-        if "qt" in supported:
-            attempts += [("qt", "MPEG-4 Video"), ("qt", "H.264"), ("qt", None)]
-
-        result = None
-        log = []   # 各試行の結果を記録（失敗時に表示して原因を特定する）
-        for fmt, comp in attempts:
-            label = f"{fmt}/{comp or '既定'}"
+        seq_base = os.path.join(seq_dir, stem).replace("\\", "/")
+        log = []
+        ok = False
+        for comp in ("jpg", "png"):   # 連番画像（コーデック不要）
             try:
-                kw = dict(filename=tmp_base, format=fmt, forceOverwrite=True,
-                          viewer=False, percent=100, quality=100,
-                          widthHeight=[width, height], showOrnaments=True,
-                          clearCache=True)
-                if comp:
-                    kw["compression"] = comp
-                res = cmds.playblast(**kw)
-                if res and os.path.isfile(res):
-                    result = res
-                    log.append(f"  ✓ {label} → {os.path.basename(res)}")
+                cmds.playblast(filename=seq_base, format="image", compression=comp,
+                               widthHeight=[width, height], percent=100, quality=90,
+                               framePadding=4, forceOverwrite=True, viewer=False,
+                               showOrnaments=True, clearCache=True)
+                frames = find_scene_sequence(scene_path)
+                if frames:
+                    ok = True
+                    log.append(f"  ✓ image/{comp} → {len(frames)} フレーム")
                     break
-                log.append(f"  ✗ {label}: ファイル未生成 (返り値={res})")
+                log.append(f"  ✗ image/{comp}: フレーム未生成")
             except Exception as e:
-                log.append(f"  ✗ {label}: {e}")
+                log.append(f"  ✗ image/{comp}: {e}")
                 continue
 
         print("[OG_Pipeline] playblast 試行:\n" + "\n".join(log))
 
-        if not result:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        if not ok:
             detail = "\n".join(log) or "(試行なし)"
             QMessageBox.warning(
                 self, "プレイブラスト失敗",
-                "動画を書き出せませんでした。各フォーマットの結果:\n\n" + detail +
-                "\n\nMaya のスクリプトエディタに利用可能コーデックを確認:\n"
-                "  import maya.cmds as cmds\n"
-                "  print(cmds.playblast(q=True, format=True))\n"
-                "  print(cmds.playblast(q=True, compression=True))",
+                "連番画像を書き出せませんでした:\n\n" + detail,
             )
             self.statusLabel.setText("⚠  プレイブラスト失敗（詳細はダイアログ参照）")
             return
 
-        # 完成した動画を movies フォルダへコピー（最終コピーは自前で行い、明確に判定）
-        ext = os.path.splitext(result)[1] or ".mov"
-        dest = os.path.join(folder, Path(scene_path).stem + ext)
-        try:
-            shutil.copy2(result, dest)
-        except Exception as e:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-            self.statusLabel.setText(
-                f"⚠  出力先へコピーできません（空き容量／アクセス権を確認）: {e}"
-            )
-            return
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-        self.statusLabel.setText(f"🎬  プレイブラスト: {dest}")
-        self.detailPanel.reload_video()   # 選択中シーンの動画ならサイドバー更新
+        self.statusLabel.setText(f"🎬  プレイブラスト: {seq_dir}（連番 {len(find_scene_sequence(scene_path))} 枚）")
+        self.detailPanel.reload_video()   # 選択中シーンならサイドバーで連番再生
 
     def _open_in_explorer(self):
         """選択中のシーンのフォルダを OS のファイラで開く（ファイルを選択状態にする）。"""
