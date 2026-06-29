@@ -24,7 +24,7 @@ from pathlib import Path
 try:
     from PySide2 import QtWidgets, QtCore, QtGui
     from PySide2.QtCore import Qt, QThread, Signal, QSize, QTimer, QUrl
-    from PySide2.QtGui import QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QLinearGradient
+    from PySide2.QtGui import QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QLinearGradient, QImage
     from PySide2.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QLabel, QPushButton, QTreeWidget, QTreeWidgetItem, QLineEdit,
@@ -37,7 +37,7 @@ except ImportError:
     try:
         from PySide6 import QtWidgets, QtCore, QtGui
         from PySide6.QtCore import Qt, QThread, Signal, QSize, QTimer, QUrl
-        from PySide6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QLinearGradient
+        from PySide6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QLinearGradient, QImage
         from PySide6.QtWidgets import (
             QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
             QLabel, QPushButton, QTreeWidget, QTreeWidgetItem, QLineEdit,
@@ -166,6 +166,73 @@ def open_file_external(path):
     except Exception as e:
         print("[OG_Pipeline] 動画を開けませんでした:", e)
         return False
+
+
+# ─── 動画デコード（OpenCV）。あれば mp4 を埋め込み再生できる ──────────────────────
+_HAS_CV2 = False
+
+
+def _ensure_user_site():
+    """--user インストール先（ユーザー site-packages）を sys.path に追加。"""
+    try:
+        import site
+        for us in {site.getusersitepackages()} if hasattr(site, "getusersitepackages") else set():
+            if us and os.path.isdir(us) and us not in sys.path:
+                sys.path.append(us)
+    except Exception:
+        pass
+
+
+def _try_import_cv2():
+    global _HAS_CV2
+    try:
+        import cv2  # noqa: F401
+        _HAS_CV2 = True
+        return True
+    except Exception:
+        _ensure_user_site()
+        try:
+            import cv2  # noqa: F401
+            _HAS_CV2 = True
+        except Exception:
+            _HAS_CV2 = False
+    return _HAS_CV2
+
+
+_try_import_cv2()
+
+
+def _find_mayapy():
+    """mayapy 実行ファイルのパスを返す（無ければ None）。"""
+    d = os.path.dirname(sys.executable)
+    cands = [os.path.join(d, "mayapy.exe"), os.path.join(d, "mayapy"),
+             os.path.join(d, "bin", "mayapy.exe"), os.path.join(d, "bin", "mayapy")]
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def install_opencv():
+    """opencv-python-headless を --user で導入する。戻り値: (成功, ログ)。
+
+    --user なので共有 Maya 本体は変更せず、管理者権限も不要。
+    """
+    exe = _find_mayapy()
+    if not exe:
+        return False, "mayapy が見つかりませんでした。手動で `mayapy -m pip install --user opencv-python-headless` を実行してください。"
+    try:
+        proc = subprocess.run(
+            [exe, "-m", "pip", "install", "--user", "opencv-python-headless"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900,
+        )
+        log = (proc.stdout or b"").decode("utf-8", "replace")[-2000:]
+        ok = (proc.returncode == 0)
+        if ok:
+            _try_import_cv2()
+        return (ok and _HAS_CV2), log
+    except Exception as e:
+        return False, str(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -555,6 +622,10 @@ class VideoPlayer(QWidget):
         self._idx = 0
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._next_frame)
+        # cv2 による mp4 再生用
+        self._cap = None
+        self._cv_timer = QTimer(self)
+        self._cv_timer.timeout.connect(self._cv2_tick)
         self._frameLabel = QLabel()
         self._frameLabel.setAlignment(Qt.AlignCenter)
         self._frameLabel.setMinimumHeight(150)
@@ -612,11 +683,21 @@ class VideoPlayer(QWidget):
     # ── 共通 ──────────────────────────────────────────────
     def _stop_all(self):
         self._timer.stop()
+        self._cv_timer.stop()
+        self._release_cap()
         if self._player:
             try:
                 self._player.stop()
             except Exception:
                 pass
+
+    def _release_cap(self):
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
 
     def clear_player(self):
         self._stop_all()
@@ -740,6 +821,9 @@ class VideoPlayer(QWidget):
         if not path:
             self.clear_player()
             return
+        # 優先: cv2（この Maya では QtMultimedia が再生不可なため）
+        if _HAS_CV2 and self._start_cv2(path):
+            return
         if _QT_MM and self._player:
             # フレーム到達まではプレースホルダ表示（黒画面で固まらせない）
             self._frameLabel.hide()
@@ -760,9 +844,55 @@ class VideoPlayer(QWidget):
                 self._video_unavailable()
         else:
             self._frameLabel.hide()
-            self._placeholder.setText("動画あり（内蔵プレイヤー非対応）\n下のボタンで再生")
+            self._placeholder.setText(
+                "この環境では mp4 を埋め込み再生できません。\n"
+                "［外部プレイヤーで開く］、または cv2 を導入してください。"
+            )
             self._placeholder.show()
             self._openBtn.show()
+
+    # ── cv2 による mp4 再生（連番と同じ QLabel に描画） ──────
+    def _start_cv2(self, path):
+        try:
+            import cv2
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                cap.release()
+                return False
+            self._cap = cap
+            fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+            if fps <= 0 or fps > 60:
+                fps = 24.0
+            self._placeholder.hide()
+            self._frameLabel.show()
+            self._cv2_tick()                       # 1枚目を即描画
+            self._cv_timer.start(max(1, int(1000 / fps)))
+            self._openBtn.show()
+            return True
+        except Exception as e:
+            print("[OG_Pipeline] cv2 再生エラー:", e)
+            self._release_cap()
+            return False
+
+    def _cv2_tick(self):
+        try:
+            import cv2
+            if self._cap is None:
+                self._cv_timer.stop()
+                return
+            ok, frame = self._cap.read()
+            if not ok:
+                self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)   # ループ
+                ok, frame = self._cap.read()
+                if not ok:
+                    self._cv_timer.stop()
+                    return
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w = rgb.shape[:2]
+            img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+            self._paint_image(img.copy())
+        except Exception:
+            pass
 
     def _open_external(self):
         if self._path:
@@ -801,7 +931,11 @@ class GridVideoCell(QWidget):
         lay.addWidget(self._view)
 
         self._got_frame = False
-        if video_path and _QT_MM:
+        self._cap = None
+        self._cv_timer = None
+        if video_path and _HAS_CV2 and self._start_cv2(video_path):
+            sub = QLabel(Path(video_path).name)
+        elif video_path and _QT_MM:
             self._view.setText("読み込み中…")
             self._player = QMediaPlayer(self)
             try:
@@ -888,7 +1022,55 @@ class GridVideoCell(QWidget):
         except Exception:
             pass
 
+    # cv2 でのデコード（グリッドは負荷軽減のため低めの fps）
+    def _start_cv2(self, path):
+        try:
+            import cv2
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                cap.release()
+                return False
+            self._cap = cap
+            self._cv_timer = QTimer(self)
+            self._cv_timer.timeout.connect(self._cv2_tick)
+            self._cv_timer.start(100)   # 約10fps
+            self._cv2_tick()
+            return True
+        except Exception:
+            if self._cap is not None:
+                try:
+                    self._cap.release()
+                except Exception:
+                    pass
+                self._cap = None
+            return False
+
+    def _cv2_tick(self):
+        try:
+            import cv2
+            if self._cap is None:
+                return
+            ok, frame = self._cap.read()
+            if not ok:
+                self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ok, frame = self._cap.read()
+                if not ok:
+                    return
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w = rgb.shape[:2]
+            self._paint(QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy())
+        except Exception:
+            pass
+
     def stop(self):
+        if self._cv_timer:
+            self._cv_timer.stop()
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
         if self._player:
             try:
                 self._player.stop()
@@ -1800,6 +1982,14 @@ class OGPipelineWindow(QWidget):
         self.allShotsBtn.clicked.connect(self._open_all_shots)
         layout.addWidget(self.allShotsBtn)
 
+        # cv2 が無い環境向け: mp4 埋め込み再生を有効化（cv2 を --user 導入）
+        self.enableMp4Btn = QPushButton("🎬  mp4再生を有効化")
+        self.enableMp4Btn.setObjectName("refreshBtn")
+        self.enableMp4Btn.setToolTip("opencv-python を --user 導入して mp4 を埋め込み再生（共有 Maya は変更しません）")
+        self.enableMp4Btn.clicked.connect(self._install_cv2)
+        self.enableMp4Btn.setVisible(not _HAS_CV2)
+        layout.addWidget(self.enableMp4Btn)
+
         layout.addStretch()
         return bar
 
@@ -1810,6 +2000,34 @@ class OGPipelineWindow(QWidget):
         self._all_shots_dlg = AllShotsDialog(self.active_shots_parent, self)
         self._all_shots_dlg.show()
         self._all_shots_dlg.raise_()
+
+    def _install_cv2(self):
+        r = QMessageBox.question(
+            self, "mp4 再生を有効化",
+            "opencv-python-headless を --user でインストールします。\n"
+            "（共有 Maya 本体は変更せず、ユーザー領域に入ります。数分かかる場合があります）\n\n"
+            "ネットワーク/プロキシ環境では失敗することがあります。続行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if r != QMessageBox.Yes:
+            return
+        self.statusLabel.setText("cv2 をインストール中…（しばらくお待ちください）")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ok, log = install_opencv()
+        finally:
+            QApplication.restoreOverrideCursor()
+        if ok:
+            self.enableMp4Btn.setVisible(False)
+            self.statusLabel.setText("✓  cv2 を導入しました。mp4 を埋め込み再生できます")
+            self.detailPanel.reload_video()
+            QMessageBox.information(self, "完了",
+                                    "cv2 を導入しました。mp4 が埋め込み再生されます。\n"
+                                    "（うまく読み込めない場合は Maya を再起動してください）")
+        else:
+            QMessageBox.warning(self, "インストール失敗",
+                                "cv2 を導入できませんでした。ログ:\n\n" + (log or "")[-1500:])
+            self.statusLabel.setText("⚠  cv2 の導入に失敗しました")
 
     def _build_toolbar(self) -> QWidget:
         toolbar = QWidget()
