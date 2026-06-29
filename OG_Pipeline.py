@@ -283,6 +283,68 @@ def install_opencv():
         return False, str(e)
 
 
+class Cv2VideoThread(QThread):
+    """cv2 で mp4 をバックグラウンドデコードし、縮小済みフレームを QImage で通知する。
+
+    GUI スレッドをブロックしないため UI が固まらない。max_w で解像度を落として
+    デコード後にリサイズ（描画コスト・転送量を削減）。
+    """
+    frameReady = Signal(object)   # QImage
+
+    def __init__(self, path, max_w=640, fps=None, parent=None):
+        super().__init__(parent)
+        self._path = path
+        self._max_w = int(max_w) if max_w else 0
+        self._fps = fps
+        self._running = True
+
+    def run(self):
+        try:
+            import cv2
+        except Exception:
+            return
+        cap = cv2.VideoCapture(self._path)
+        if not cap.isOpened():
+            try:
+                cap.release()
+            except Exception:
+                pass
+            return
+        src = cap.get(cv2.CAP_PROP_FPS) or 24.0
+        fps = self._fps or src
+        if not fps or fps <= 0 or fps > 60:
+            fps = 24.0
+        delay = max(10, int(1000.0 / fps))
+        try:
+            while self._running:
+                ok, frame = cap.read()
+                if not ok:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                h, w = frame.shape[:2]
+                if self._max_w and w > self._max_w:
+                    nh = max(1, int(h * self._max_w / float(w)))
+                    frame = cv2.resize(frame, (self._max_w, nh))
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                hh, ww = rgb.shape[:2]
+                img = QImage(rgb.data, ww, hh, 3 * ww, QImage.Format_RGB888).copy()
+                self.frameReady.emit(img)
+                self.msleep(delay)
+        except Exception:
+            pass
+        finally:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+    def stop(self):
+        self._running = False
+        self.wait(1500)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  ルート設定の永続化（JSON）
 #  Playblast ツールと同じ方針: optionVar ではなく通常ファイルに保存する。
@@ -670,10 +732,8 @@ class VideoPlayer(QWidget):
         self._idx = 0
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._next_frame)
-        # cv2 による mp4 再生用
-        self._cap = None
-        self._cv_timer = QTimer(self)
-        self._cv_timer.timeout.connect(self._cv2_tick)
+        # cv2 による mp4 再生用（バックグラウンドデコード）
+        self._cv_thread = None
         self._frameLabel = QLabel()
         self._frameLabel.setAlignment(Qt.AlignCenter)
         self._frameLabel.setMinimumHeight(150)
@@ -687,40 +747,11 @@ class VideoPlayer(QWidget):
         lay.addWidget(self._counter)
 
         # 動画ファイル（mp4 等）用。QVideoWidget は使わず、フレームを上の QLabel に描く。
-        # 環境によっては QtMultimedia が再生不可（Maya 同梱 Qt 等）。フレームが来るか
-        # 実測し、来なければ「外部で開く」へ自動フォールバックする。
+        # 動画再生は cv2（バックグラウンドスレッド）で行う。QtMultimedia は
+        # Maya では再生不可かつ重いため使用しない。
         self._player = None
-        self._audio = None
-        self._sink = None
-        self._surface = None
         self._got_frame = False
         self._video_token = 0
-        if _QT_MM:
-            self._player = QMediaPlayer()
-            try:
-                self._player.error.connect(self._on_player_error)
-            except Exception:
-                pass
-            if _QT_MM == 6:
-                self._sink = QVideoSink(self)
-                self._player.setVideoSink(self._sink)
-                self._sink.videoFrameChanged.connect(self._on_frame_ps6)
-                self._audio = QAudioOutput(self)
-                self._audio.setMuted(True)
-                self._player.setAudioOutput(self._audio)
-                try:
-                    self._player.setLoops(QMediaPlayer.Infinite)
-                except Exception:
-                    pass
-            else:
-                self._surface = _FrameSurface(self)
-                self._surface.newImage.connect(self._paint_image)
-                self._player.setVideoOutput(self._surface)
-                try:
-                    self._player.setMuted(True)
-                except Exception:
-                    pass
-                self._player.mediaStatusChanged.connect(self._loop_ps2)
 
         self._openBtn = QPushButton("▶  外部プレイヤーで開く")
         self._openBtn.setObjectName("refreshBtn")
@@ -731,21 +762,16 @@ class VideoPlayer(QWidget):
     # ── 共通 ──────────────────────────────────────────────
     def _stop_all(self):
         self._timer.stop()
-        self._cv_timer.stop()
-        self._release_cap()
-        if self._player:
+        if self._cv_thread is not None:
             try:
-                self._player.stop()
+                self._cv_thread.frameReady.disconnect()
             except Exception:
                 pass
-
-    def _release_cap(self):
-        if self._cap is not None:
             try:
-                self._cap.release()
+                self._cv_thread.stop()
             except Exception:
                 pass
-            self._cap = None
+            self._cv_thread = None
 
     def clear_player(self):
         self._stop_all()
@@ -843,22 +869,7 @@ class VideoPlayer(QWidget):
         self._idx = (self._idx + 1) % len(self._frames)
         self._show_frame(self._idx)
 
-    # ── 動画ファイル（mp4 等：QLabel に描画） ───────────────
-    def _loop_ps2(self, status):
-        try:
-            if status == QMediaPlayer.EndOfMedia and self._path:
-                self._player.setPosition(0)
-                self._player.play()
-        except Exception:
-            pass
-
-    def _on_frame_ps6(self, frame):
-        try:
-            img = frame.toImage()
-            self._paint_image(img)
-        except Exception:
-            pass
-
+    # ── 動画ファイル（mp4：cv2 でバックグラウンド再生） ─────
     def set_video(self, path):
         """動画ファイルを再生。cv2 があれば埋め込み、無ければ外部ボタン。
 
@@ -891,48 +902,26 @@ class VideoPlayer(QWidget):
         self._placeholder.show()
         self._openBtn.show()
 
-    # ── cv2 による mp4 再生（連番と同じ QLabel に描画） ──────
+    # ── cv2 による mp4 再生（別スレッドでデコード→QLabel に描画） ─
     def _start_cv2(self, path):
         try:
-            import cv2
-            cap = cv2.VideoCapture(path)
-            if not cap.isOpened():
-                cap.release()
-                return False
-            self._cap = cap
-            fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
-            if fps <= 0 or fps > 60:
-                fps = 24.0
-            self._placeholder.hide()
-            self._frameLabel.show()
-            self._cv2_tick()                       # 1枚目を即描画
-            self._cv_timer.start(max(1, int(1000 / fps)))
+            self._placeholder.setText("動画を読み込み中…")
+            self._placeholder.show()
             self._openBtn.show()
+            self._cv_thread = Cv2VideoThread(path, max_w=640, parent=self)
+            self._cv_thread.frameReady.connect(self._paint_image)
+            self._cv_thread.start()
+            token = self._video_token
+            QTimer.singleShot(2500, lambda: self._cv_watchdog(token))
             return True
         except Exception as e:
             print("[OG_Pipeline] cv2 再生エラー:", e)
-            self._release_cap()
             return False
 
-    def _cv2_tick(self):
-        try:
-            import cv2
-            if self._cap is None:
-                self._cv_timer.stop()
-                return
-            ok, frame = self._cap.read()
-            if not ok:
-                self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)   # ループ
-                ok, frame = self._cap.read()
-                if not ok:
-                    self._cv_timer.stop()
-                    return
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w = rgb.shape[:2]
-            img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
-            self._paint_image(img.copy())
-        except Exception:
-            pass
+    def _cv_watchdog(self, token):
+        # 2.5秒待ってもフレームが来なければ開けなかったと判断 → 外部再生
+        if token == self._video_token and self._path and not self._got_frame:
+            self.set_external(self._path)
 
     def _open_external(self):
         if self._path:
@@ -953,8 +942,7 @@ class GridVideoCell(QWidget):
     def __init__(self, shot_name, media, parent=None):
         super().__init__(parent)
         self.setFixedWidth(self.CELL_W)
-        self._cap = None
-        self._cv_timer = None
+        self._cv_thread = None
         self._frames = []
         self._idx = 0
         self._seq_timer = None
@@ -1024,52 +1012,30 @@ class GridVideoCell(QWidget):
         self._idx = (self._idx + 1) % len(self._frames)
         self._show_seq(self._idx)
 
-    # cv2 動画（グリッドは負荷軽減のため約10fps）
+    # cv2 動画（別スレッドでデコード。グリッドは縮小＋低fpsで軽量化）
     def _start_cv2(self, path):
         try:
-            import cv2
-            cap = cv2.VideoCapture(path)
-            if not cap.isOpened():
-                cap.release()
-                return False
-            self._cap = cap
-            self._cv_timer = QTimer(self)
-            self._cv_timer.timeout.connect(self._cv2_tick)
-            self._cv_timer.start(100)
-            self._cv2_tick()
+            self._cv_thread = Cv2VideoThread(path, max_w=self.CELL_W, fps=12, parent=self)
+            self._cv_thread.frameReady.connect(self._paint)
+            self._cv_thread.start()
             return True
         except Exception:
-            self._cap = None
+            self._cv_thread = None
             return False
 
-    def _cv2_tick(self):
-        try:
-            import cv2
-            if self._cap is None:
-                return
-            ok, frame = self._cap.read()
-            if not ok:
-                self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ok, frame = self._cap.read()
-                if not ok:
-                    return
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w = rgb.shape[:2]
-            self._paint(QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy())
-        except Exception:
-            pass
-
     def stop(self):
-        if self._cv_timer:
-            self._cv_timer.stop()
         if self._seq_timer:
             self._seq_timer.stop()
-        if self._cap is not None:
+        if self._cv_thread is not None:
             try:
-                self._cap.release()
+                self._cv_thread.frameReady.disconnect()
             except Exception:
                 pass
-            self._cap = None
+            try:
+                self._cv_thread.stop()
+            except Exception:
+                pass
+            self._cv_thread = None
 
 
 class AllShotsDialog(QDialog):
