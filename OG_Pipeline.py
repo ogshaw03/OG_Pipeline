@@ -1008,6 +1008,30 @@ class VideoPlayer(QWidget):
 
 
 # ─── 全ショット動画一覧（グリッド・自動再生） ───────────────────────────────────
+# 工程ごとの色。バッジ・サイドバーのラベルに使う（暗い文字が乗る前提の明るめの色）。
+_STAGE_COLOR_MAP = {
+    "lay_pri": "#4a90d9",   # 青
+    "lay_anm": "#5fb878",   # 緑
+    "anm_pri": "#e8a838",   # 琥珀
+    "anm_sec": "#d9734a",   # 橙
+}
+_STAGE_PALETTE = [
+    "#4a90d9", "#5fb878", "#e8a838", "#d9734a",
+    "#9b6dd6", "#46c4b8", "#d96d9e", "#c5c043",
+]
+
+
+def stage_color(stage):
+    """工程名から安定した表示色を返す。既知工程は固定色、未知は名前ハッシュで割当。"""
+    if not stage:
+        return "#e8a838"
+    key = stage.lower()
+    if key in _STAGE_COLOR_MAP:
+        return _STAGE_COLOR_MAP[key]
+    h = sum(ord(c) for c in key)
+    return _STAGE_PALETTE[h % len(_STAGE_PALETTE)]
+
+
 class GridVideoCell(QWidget):
     """グリッド内の1セル。media = pick_folder_media() の結果。
 
@@ -1015,7 +1039,8 @@ class GridVideoCell(QWidget):
     """
     CELL_W, CELL_H = 300, 175
 
-    def __init__(self, title, media, stage="", on_click=None, payload=None, parent=None):
+    def __init__(self, title, media, stage="", on_click=None, payload=None,
+                 title_color=None, parent=None):
         super().__init__(parent)
         self.setFixedWidth(self.CELL_W)
         self._cv_thread = None
@@ -1031,12 +1056,14 @@ class GridVideoCell(QWidget):
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
         name = QLabel(title)
-        name.setStyleSheet("color: #e8c87a; font-size: 11px; font-weight: bold;")
+        name.setStyleSheet("color: %s; font-size: 15px; font-weight: bold;"
+                           % (title_color or "#e8c87a"))
         head.addWidget(name, 1)
         if stage:
             badge = QLabel(stage)
-            badge.setStyleSheet("color: #0f1117; background: #e8a838; border-radius: 3px;"
-                                " padding: 1px 6px; font-size: 9px; font-weight: bold;")
+            badge.setStyleSheet(
+                "color: #0f1117; background: %s; border-radius: 3px;"
+                " padding: 2px 9px; font-size: 12px; font-weight: bold;" % stage_color(stage))
             head.addWidget(badge)
         lay.addLayout(head)
 
@@ -1298,7 +1325,8 @@ class AllShotsDialog(QDialog):
         if not stages:
             self._side_layout.addWidget(QLabel("工程フォルダに動画が見つかりません"))
         for stage_name, media, _mt in reversed(stages):   # 新しい工程を上に
-            cell = GridVideoCell(stage_name, media, parent=self._side_content)
+            cell = GridVideoCell(stage_name, media, title_color=stage_color(stage_name),
+                                 parent=self._side_content)
             self._side_layout.addWidget(cell)
             self._side_cells.append(cell)
         self._side_layout.addStretch()
