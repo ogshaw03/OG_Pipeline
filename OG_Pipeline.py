@@ -2207,13 +2207,14 @@ class OGPipelineWindow(QWidget):
         tmpdir = tempfile.mkdtemp(prefix="ogpb_")
         tmp_base = os.path.join(tmpdir, Path(scene_path).stem).replace("\\", "/")
 
-        # この環境がサポートするフォーマットだけを試す。qt は最終コピーで失敗する
-        # 環境があるため、avi / movie を優先し、qt は最後に回す。
+        # QuickTime の MPEG-4 Video コーデック(.mov)を最優先。H.264 が無い環境向け。
+        # それも不可なら H.264 / avi / movie の順でフォールバックする。
         try:
             supported = set(cmds.playblast(q=True, format=True) or [])
         except Exception:
             supported = set()
-        order = [("avi", None), ("movie", None), ("qt", "H.264"), ("qt", None)]
+        order = [("qt", "MPEG-4 Video"), ("qt", "H.264"), ("qt", None),
+                 ("avi", None), ("movie", None)]
         attempts = [(f, c) for f, c in order if not supported or f in supported] or [("qt", None)]
 
         result = None
