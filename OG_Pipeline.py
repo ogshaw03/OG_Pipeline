@@ -2207,15 +2207,35 @@ class OGPipelineWindow(QWidget):
         tmpdir = tempfile.mkdtemp(prefix="ogpb_")
         tmp_base = os.path.join(tmpdir, Path(scene_path).stem).replace("\\", "/")
 
-        # QuickTime の MPEG-4 Video コーデック(.mov)を最優先。H.264 が無い環境向け。
-        # それも不可なら H.264 / avi / movie の順でフォールバックする。
+        # 利用可能なフォーマット／コーデックを実行時に問い合わせて決める。
+        # QuickTime 非搭載の環境では qt(.mov) が使えないため avi を主とする。
         try:
             supported = set(cmds.playblast(q=True, format=True) or [])
         except Exception:
             supported = set()
-        order = [("qt", "MPEG-4 Video"), ("qt", "H.264"), ("qt", None),
-                 ("avi", None), ("movie", None)]
-        attempts = [(f, c) for f, c in order if not supported or f in supported] or [("qt", None)]
+        try:
+            comps = cmds.playblast(q=True, compression=True) or []
+        except Exception:
+            comps = []
+
+        def _pick(tokens):
+            for t in tokens:
+                for c in comps:
+                    if t.lower() in c.lower():
+                        return c
+            return None
+
+        # avi コーデックの優先順位: 圧縮でき再生互換の高いものから（ローカライズ名対応）
+        avi_codec = _pick(["MS-CRAM", "Video 1", "CRAM", "IYUV",
+                           "MS-YUV", "Toshiba", "YUV", "none", "MS-RLE", "RLE"])
+
+        attempts = []
+        if avi_codec:
+            attempts.append(("avi", avi_codec))
+        attempts += [("avi", None), ("movie", None)]
+        # qt は最後（多くの Windows 環境では QuickTime 非搭載で失敗する）
+        if "qt" in supported:
+            attempts += [("qt", "MPEG-4 Video"), ("qt", "H.264"), ("qt", None)]
 
         result = None
         last_err = None
