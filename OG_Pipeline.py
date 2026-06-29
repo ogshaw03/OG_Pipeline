@@ -102,6 +102,45 @@ def find_scene_sequence(scene_path):
     return None
 
 
+def find_latest_shot_media(shot_folder):
+    """ショットフォルダ配下の「最新」プレイブラストを返す。
+
+    movies フォルダ配下を再帰探索し、更新日時が最も新しいものを採用する。
+    戻り値: ("seq", [frames]) / ("movie", path) / None。
+    """
+    if not shot_folder or not os.path.isdir(shot_folder):
+        return None
+    best = None  # (mtime, kind, value)
+    for cur, dirs, files in os.walk(shot_folder):
+        parent = os.path.basename(os.path.dirname(cur))
+        base = os.path.basename(cur)
+        # movies/<stem>/ … 連番画像ディレクトリ
+        if parent == VIDEO_SUBDIR:
+            frames = sorted(os.path.join(cur, f) for f in files
+                            if os.path.splitext(f)[1].lower() in SEQ_EXTS)
+            if frames:
+                try:
+                    m = max(os.path.getmtime(fr) for fr in frames)
+                except Exception:
+                    m = 0.0
+                if best is None or m > best[0]:
+                    best = (m, "seq", frames)
+        # movies/ 直下 … 単一動画ファイル
+        if base == VIDEO_SUBDIR:
+            for f in files:
+                if os.path.splitext(f)[1].lower() in VIDEO_EXTS:
+                    full = os.path.join(cur, f)
+                    try:
+                        m = os.path.getmtime(full)
+                    except Exception:
+                        m = 0.0
+                    if best is None or m > best[0]:
+                        best = (m, "movie", full)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
 def open_file_external(path):
     """OS の既定アプリでファイルを開く。"""
     try:
@@ -150,7 +189,7 @@ def _config_path():
 
 
 def _normalize_entries(data):
-    """任意の入力を [{'name','path'}, ...] に正規化する。"""
+    """任意の入力を [{'name','path','shots_parent'}, ...] に正規化する。"""
     if isinstance(data, dict) and "roots" in data:
         data = data["roots"]
     elif isinstance(data, dict) and "path" in data:
@@ -166,7 +205,12 @@ def _normalize_entries(data):
         if not name or not path or name in seen:
             continue
         seen.add(name)
-        out.append({"name": name, "path": path})
+        out.append({
+            "name": name,
+            "path": path,
+            # ショットフォルダの親階層（直下のフォルダ＝ショット）。未設定なら root 自身。
+            "shots_parent": str(e.get("shots_parent", "")).strip() or path,
+        })
     return out
 
 
@@ -187,10 +231,11 @@ def save_roots(roots):
         print("[OG_Pipeline] ルート保存エラー:", e)
 
 
-def add_root(name, path):
+def add_root(name, path, shots_parent=""):
     """ルートを追加（同名は上書き）し、名前順で保存する。"""
     roots = [r for r in load_roots() if r["name"] != name]
-    roots.append({"name": name, "path": path})
+    roots.append({"name": name, "path": path,
+                  "shots_parent": (shots_parent or path)})
     roots.sort(key=lambda r: r["name"].lower())
     save_roots(roots)
     return roots
@@ -206,6 +251,13 @@ def find_root_path(name):
     for r in load_roots():
         if r["name"] == name:
             return r["path"]
+    return None
+
+
+def find_root_entry(name):
+    for r in load_roots():
+        if r["name"] == name:
+            return r
     return None
 
 
@@ -654,6 +706,7 @@ class DetailPanel(QWidget):
 
         # 動画プレイヤー（シーンと同名のプレイブラストを再生）
         self._abs_path = ""
+        self._shot_folder = ""
         self.video = VideoPlayer()
         vwrap = QWidget()
         vlay = QVBoxLayout(vwrap)
@@ -692,6 +745,7 @@ class DetailPanel(QWidget):
     def clear(self):
         self._clear_layout()
         self._abs_path = ""
+        self._shot_folder = ""
         if hasattr(self, "video"):
             self.video.clear_player()
         placeholder = QLabel("ファイルを選択すると\n詳細が表示されます")
@@ -701,12 +755,45 @@ class DetailPanel(QWidget):
         self.contentLayout.addStretch()
 
     def reload_video(self):
-        """現在表示中シーンの動画／連番を再探索して反映（プレイブラスト直後など）。"""
-        if self._abs_path:
+        """現在表示中の動画／連番を再探索して反映（プレイブラスト直後など）。"""
+        if self._shot_folder:
+            self.show_shot_media(self._shot_folder)
+        elif self._abs_path:
             self._show_media(self._abs_path)
+
+    def show_shot_media(self, folder):
+        """ショットフォルダ配下の最新プレイブラストをサイドバーに表示する。"""
+        self._abs_path = ""
+        self._shot_folder = folder
+        self._clear_layout()
+        name = Path(folder).name
+        media = find_latest_shot_media(folder)
+        if hasattr(self, "video"):
+            if media is None:
+                self.video.clear_player()
+            elif media[0] == "seq":
+                self.video.set_sequence(media[1])
+            else:
+                self.video.set_video(media[1])
+
+        title = QLabel(f"📁  {name}")
+        title.setObjectName("detailFilename")
+        title.setWordWrap(True)
+        self.contentLayout.addWidget(title)
+        if media is None:
+            sub = QLabel("このショットに動画はありません\n（シーンを選んで PLAYBLAST）")
+        elif media[0] == "seq":
+            sub = QLabel(f"最新プレイブラスト（連番 {len(media[1])} 枚）")
+        else:
+            sub = QLabel(f"最新プレイブラスト: {Path(media[1]).name}")
+        sub.setObjectName("detailValue")
+        sub.setWordWrap(True)
+        self.contentLayout.addWidget(sub)
+        self.contentLayout.addStretch()
 
     def update_info(self, rel_path: str, abs_path: str, size: int, mtime: float):
         self._abs_path = abs_path
+        self._shot_folder = ""
         if hasattr(self, "video"):
             self._show_media(abs_path)
         self._clear_layout()
@@ -787,6 +874,7 @@ class ColumnBrowser(QWidget):
     file_selected = Signal(object)   # 選択ファイル情報 dict、解除時は None
     file_activated = Signal(str)     # ダブルクリックで開く（絶対パス）
     context_requested = Signal(str, object)  # 右クリック: (絶対パス, グローバル座標)
+    folder_selected = Signal(str)    # フォルダ選択: 絶対パス
 
     COL_WIDTH = 240        # 既定（最小）幅
     COL_MIN_WIDTH = 200    # カラムの下限幅
@@ -1040,7 +1128,7 @@ class ColumnBrowser(QWidget):
         self._trim_after(lw)
         kind, path = item.data(Qt.UserRole)
         if kind == "dir":
-            self.file_selected.emit(None)
+            self.folder_selected.emit(path)
             self._add_column(Path(path))
         else:
             self.file_selected.emit(self._file_info(path))
@@ -1319,6 +1407,7 @@ class OGPipelineWindow(QWidget):
         self._pending_query = ""
         self._loading_combo = False
         self.active_root = None
+        self.active_shots_parent = None
 
         self.setStyleSheet(STYLE)
         self._build_ui()
@@ -1493,6 +1582,7 @@ class OGPipelineWindow(QWidget):
         self.browser.file_selected.connect(self._on_file_selected)
         self.browser.file_activated.connect(self._open_path)
         self.browser.context_requested.connect(self._show_context_menu)
+        self.browser.folder_selected.connect(self._on_folder_selected)
         layout.addWidget(self.browser, 1)
 
         action_bar = QWidget()
@@ -1586,13 +1676,16 @@ class OGPipelineWindow(QWidget):
         name = self._current_root_name()
         if not name:
             self.active_root = None
+            self.active_shots_parent = None
             self.rootPathLabel.setText("▸  ルート未登録")
             self.browser.set_root(None)
             self.statusLabel.setText(
                 "プロジェクトルート未登録 — [＋ 追加] か [⭳ インポート] で登録してください"
             )
             return
-        self.active_root = find_root_path(name)
+        entry = find_root_entry(name) or {}
+        self.active_root = entry.get("path") or find_root_path(name)
+        self.active_shots_parent = entry.get("shots_parent") or self.active_root
         self.rootPathLabel.setText(f"▸  {self.active_root}")
         self._apply_view()
 
@@ -1609,10 +1702,48 @@ class OGPipelineWindow(QWidget):
         if not ok or not name.strip():
             return
         name = name.strip()
-        add_root(name, folder)
+
+        # ショットフォルダの「親」階層を指定（その直下のフォルダ＝ショットと判別）。
+        # キャンセル時はルート自身を親とする（root 直下がショット）。
+        QMessageBox.information(
+            self, "ショットフォルダの親を選択",
+            "次に『ショットフォルダの一つ上の階層』を選んでください。\n"
+            "そのフォルダの直下にあるフォルダをショットとして扱います。\n"
+            "（ルート直下がショットならルートを選択 / キャンセルでルート）",
+        )
+        shots_parent = QFileDialog.getExistingDirectory(
+            self, "ショットフォルダの親階層を選択（直下＝ショット）", folder
+        ) or folder
+
+        add_root(name, folder, shots_parent)
         self._reload_roots_combo(select_name=name)
         self._apply_root()
-        self.statusLabel.setText(f"✓  ルートを追加: {name}")
+        self.statusLabel.setText(f"✓  ルートを追加: {name}（ショット親: {shots_parent}）")
+
+    # ── フォルダ選択（ショットの最新動画表示） ─────────────
+    def _is_shot_folder(self, folder):
+        """folder が「ショットフォルダの親」の直下なら True（＝ショットフォルダ）。"""
+        if not self.active_shots_parent:
+            return False
+        try:
+            a = os.path.normcase(os.path.normpath(os.path.dirname(folder)))
+            b = os.path.normcase(os.path.normpath(self.active_shots_parent))
+            return a == b
+        except Exception:
+            return False
+
+    def _on_folder_selected(self, folder):
+        self._selected_path = ""
+        self.openBtn.setEnabled(False)
+        self.importBtn.setEnabled(False)
+        self.openFolderBtn.setEnabled(False)
+        name = Path(folder).name
+        if self._is_shot_folder(folder):
+            self.selectedLabel.setText(f"ショット: {name}（最新プレイブラスト）")
+            self.detailPanel.show_shot_media(folder)
+        else:
+            self.selectedLabel.setText(f"フォルダ: {name}")
+            self.detailPanel.clear()
 
     def _import_roots(self):
         fp, _ = QFileDialog.getOpenFileName(
