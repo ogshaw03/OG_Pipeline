@@ -1036,19 +1036,32 @@ class GridVideoCell(QWidget):
     """グリッド内の1セル。media = pick_folder_media() の結果。
 
     QtMultimedia は使わない（Maya で再生不可かつ重い）。cv2 動画 / 連番 / 外部のみ。
+    操作: ホバーでハイライト / 中ボタンドラッグでスクラブ / 右下の小ボタンで再生停止 /
+    下部のボタンで工程フォルダへドリル・エクスプローラーで開く。
     """
     CELL_W, CELL_H = 300, 175
 
     def __init__(self, title, media, stage="", on_click=None, payload=None,
-                 title_color=None, parent=None):
+                 title_color=None, folder=None, on_drill=None, parent=None):
         super().__init__(parent)
         self.setFixedWidth(self.CELL_W)
+        self.setObjectName("gridCell")
+        self.setStyleSheet(
+            "#gridCell { background: transparent; border: 1px solid transparent;"
+            " border-radius: 5px; }"
+            "#gridCell:hover { background: #161c2b; border: 1px solid #e8a838; }")
         self._cv_thread = None
         self._frames = []
         self._idx = 0
         self._seq_timer = None
         self._on_click = on_click
         self._payload = payload
+        self._on_drill = on_drill
+        self._user_paused = False
+        self._scrubbing = False
+        self._scrub_cap = None
+        self._scrub_total = 0
+        self._video_path = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(2)
@@ -1074,13 +1087,27 @@ class GridVideoCell(QWidget):
         self._view.setAlignment(Qt.AlignCenter)
         self._view.setFixedHeight(self.CELL_H)
         self._view.setStyleSheet("background: #000; color: #3a4055; border: 1px solid #1e2435;")
+        # マウスイベントはセルで一括処理する（スクラブ/選択）。
+        self._view.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         lay.addWidget(self._view)
+
+        # 右下の小さな再生/停止ボタン（view の上にオーバーレイ）
+        self._toggleBtn = QPushButton("▶", self)
+        self._toggleBtn.setCursor(Qt.PointingHandCursor)
+        self._toggleBtn.setFixedSize(28, 22)
+        self._toggleBtn.setToolTip("再生 / 停止")
+        self._toggleBtn.setStyleSheet(
+            "QPushButton { background: rgba(15,17,23,190); color: #e8c87a;"
+            " border: 1px solid #2a3147; border-radius: 3px; font-size: 12px; padding: 0; }"
+            "QPushButton:hover { background: rgba(232,168,56,220); color: #0f1117; }")
+        self._toggleBtn.clicked.connect(self._toggle_play)
 
         self._media = media
         self._playing = False
         kind = media[0] if media else None
         if kind == "video":
             self._view.setText("…")
+            self._video_path = media[1]
             sub = Path(media[1]).name
         elif kind == "seq":
             self._frames = media[1]
@@ -1088,6 +1115,7 @@ class GridVideoCell(QWidget):
             sub = "連番 %d 枚" % len(self._frames)
         elif kind == "ext":
             self._view.setText("外部で再生")
+            self._video_path = media[1]
             btn = QPushButton("▶  外部で開く")
             btn.setObjectName("refreshBtn")
             btn.clicked.connect(lambda _=False, p=media[1]: open_file_external(p))
@@ -1101,9 +1129,48 @@ class GridVideoCell(QWidget):
         s.setWordWrap(True)
         lay.addWidget(s)
 
+        # 埋め込み再生できるメディアだけトグルボタンを出す
+        if not self._playable():
+            self._toggleBtn.hide()
+
+        # 下部ボタン: 工程フォルダへドリル / エクスプローラーで開く
+        if folder:
+            brow = QHBoxLayout()
+            brow.setContentsMargins(0, 2, 0, 0)
+            brow.setSpacing(4)
+            drillBtn = QPushButton("⮞ 工程フォルダ")
+            drillBtn.setObjectName("refreshBtn")
+            drillBtn.setToolTip("ブラウザでこの工程フォルダを開く")
+            drillBtn.clicked.connect(lambda _=False, f=folder: self._do_drill(f))
+            openBtn = QPushButton("📂 フォルダ")
+            openBtn.setObjectName("refreshBtn")
+            openBtn.setToolTip("エクスプローラーでフォルダを開く")
+            openBtn.clicked.connect(lambda _=False, f=folder: reveal_in_explorer(f))
+            brow.addWidget(drillBtn, 1)
+            brow.addWidget(openBtn, 1)
+            lay.addLayout(brow)
+
+        QTimer.singleShot(0, self._position_overlay)
+
+    # ── メディア種別 ───────────────────────────────────
+    def _playable(self):
+        """埋め込み再生（動画 or 連番）できるか。"""
+        if not self._media:
+            return False
+        kind = self._media[0]
+        return (kind == "video" and _HAS_CV2) or (kind == "seq" and len(self._frames) > 1)
+
+    def _scrubbable(self):
+        if not self._media:
+            return False
+        kind = self._media[0]
+        return (kind == "seq" and len(self._frames) > 1) or \
+               (kind in ("video", "ext") and _HAS_CV2 and self._video_path)
+
     # ── 再生制御（表示中のセルだけ再生して負荷を抑える） ─────
     def play(self):
-        if self._playing or not self._media:
+        # ユーザーが停止中／スクラブ中は自動再生しない
+        if self._playing or self._user_paused or self._scrubbing or not self._media:
             return
         kind = self._media[0]
         if kind == "video":
@@ -1114,12 +1181,29 @@ class GridVideoCell(QWidget):
                 self._seq_timer.timeout.connect(self._next_seq)
             self._seq_timer.start(100)   # 約10fps
             self._playing = True
+        self._update_toggle_icon()
 
     def pause(self):
         self._playing = False
         if self._seq_timer:
             self._seq_timer.stop()
         self._stop_thread()
+        self._update_toggle_icon()
+
+    def _toggle_play(self):
+        if self._playing:
+            self._user_paused = True
+            self.pause()
+        else:
+            self._user_paused = False
+            self.play()
+        self._update_toggle_icon()
+
+    def _update_toggle_icon(self):
+        try:
+            self._toggleBtn.setText("⏸" if self._playing else "▶")
+        except Exception:
+            pass
 
     def _paint(self, img):
         try:
@@ -1163,14 +1247,136 @@ class GridVideoCell(QWidget):
 
     def stop(self):
         self.pause()
+        self._release_scrub_cap()
 
+    def _do_drill(self, folder):
+        if self._on_drill:
+            try:
+                self._on_drill(folder)
+            except Exception:
+                pass
+
+    # ── オーバーレイ（再生/停止ボタン）の配置 ───────────────
+    def _position_overlay(self):
+        try:
+            g = self._view.geometry()
+            bw, bh = self._toggleBtn.width(), self._toggleBtn.height()
+            self._toggleBtn.move(g.right() - bw - 6, g.bottom() - bh - 6)
+            self._toggleBtn.raise_()
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_overlay()
+
+    # ── 中ボタンスクラブ ───────────────────────────────
+    def _begin_scrub(self):
+        self._scrubbing = True
+        # 自動再生を止める（ユーザー停止フラグは触らない）
+        self._playing = False
+        if self._seq_timer:
+            self._seq_timer.stop()
+        self._stop_thread()
+
+    def _end_scrub(self):
+        self._scrubbing = False
+        self._release_scrub_cap()
+        # スクラブ前に再生していた状態へ戻す（ユーザー停止中・非表示なら戻さない）
+        if not self._user_paused:
+            try:
+                visible = not self.visibleRegion().isEmpty()
+            except Exception:
+                visible = True
+            if visible:
+                self.play()
+
+    def _scrub_to(self, x_in_cell):
+        g = self._view.geometry()
+        w = max(1, g.width())
+        frac = min(0.9999, max(0.0, (x_in_cell - g.x()) / float(w)))
+        if self._frames:
+            i = int(frac * len(self._frames))
+            self._show_seq(min(i, len(self._frames) - 1))
+        elif self._video_path and _HAS_CV2:
+            cap = self._ensure_scrub_cap()
+            if cap is not None and self._scrub_total > 0:
+                try:
+                    import cv2
+                    target = int(frac * self._scrub_total)
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+                    ok, frame = cap.read()
+                    if ok:
+                        self._show_cv_frame(frame)
+                except Exception:
+                    pass
+
+    def _ensure_scrub_cap(self):
+        if self._scrub_cap is not None:
+            return self._scrub_cap
+        try:
+            import cv2
+            cap = cv2.VideoCapture(self._video_path)
+            if not cap.isOpened():
+                cap.release()
+                return None
+            self._scrub_cap = cap
+            self._scrub_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+            return cap
+        except Exception:
+            return None
+
+    def _release_scrub_cap(self):
+        if self._scrub_cap is not None:
+            try:
+                self._scrub_cap.release()
+            except Exception:
+                pass
+        self._scrub_cap = None
+        self._scrub_total = 0
+
+    def _show_cv_frame(self, frame):
+        try:
+            import cv2
+            h, w = frame.shape[:2]
+            mw = self.CELL_W
+            if w > mw:
+                nh = max(1, int(h * mw / float(w)))
+                frame = cv2.resize(frame, (mw, nh))
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            hh, ww = rgb.shape[:2]
+            img = QImage(rgb.data, ww, hh, 3 * ww, QImage.Format_RGB888).copy()
+            self._paint(img)
+        except Exception:
+            pass
+
+    # ── マウス操作 ─────────────────────────────────────
     def mousePressEvent(self, event):
-        if self._on_click:
+        if event.button() == Qt.MiddleButton and self._scrubbable():
+            self._begin_scrub()
+            self._scrub_to(event.pos().x())
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton and self._on_click:
             try:
                 self._on_click(self._payload)
             except Exception:
                 pass
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._scrubbing:
+            self._scrub_to(event.pos().x())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._scrubbing and event.button() == Qt.MiddleButton:
+            self._end_scrub()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class AllShotsDialog(QDialog):
@@ -1253,7 +1459,7 @@ class AllShotsDialog(QDialog):
         outer.addWidget(self._foot)
 
         # ── ショットデータ収集（各ショット = 最新工程のメディア＋工程名） ──
-        self._shot_data = []   # [{name, folder, media, stage}]
+        self._shot_data = []   # [{name, folder, media, stage, stage_folder}]
         try:
             names = sorted(os.listdir(shots_parent))
         except Exception:
@@ -1268,8 +1474,10 @@ class AllShotsDialog(QDialog):
             else:
                 media, stage_name = pick_folder_media(full), ""
             if media:
+                stage_folder = os.path.join(full, stage_name) if stage_name else full
                 self._shot_data.append(
-                    {"name": d, "folder": full, "media": media, "stage": stage_name})
+                    {"name": d, "folder": full, "media": media,
+                     "stage": stage_name, "stage_folder": stage_folder})
 
         self._foot.setText(
             f"動画あり {len(self._shot_data)} / {len(names)} ショット　"
@@ -1302,6 +1510,7 @@ class AllShotsDialog(QDialog):
         for s in data:
             cell = GridVideoCell(s["name"], s["media"], stage=s["stage"],
                                  on_click=self._select_shot, payload=s["folder"],
+                                 folder=s["stage_folder"], on_drill=self._drill_to,
                                  parent=self._grid_content)
             self._grid.addWidget(cell, r, c)
             self._cells.append(cell)
@@ -1326,11 +1535,18 @@ class AllShotsDialog(QDialog):
             self._side_layout.addWidget(QLabel("工程フォルダに動画が見つかりません"))
         for stage_name, media, _mt in reversed(stages):   # 新しい工程を上に
             cell = GridVideoCell(stage_name, media, title_color=stage_color(stage_name),
-                                 parent=self._side_content)
+                                 folder=os.path.join(folder, stage_name),
+                                 on_drill=self._drill_to, parent=self._side_content)
             self._side_layout.addWidget(cell)
             self._side_cells.append(cell)
         self._side_layout.addStretch()
         QTimer.singleShot(0, self._update_visible)
+
+    def _drill_to(self, folder):
+        """親（メインウィンドウ）のブラウザでこの工程フォルダを開く。"""
+        win = self.parent()
+        if win is not None and hasattr(win, "reveal_in_browser"):
+            win.reveal_in_browser(folder)
 
     # ── 表示中のみ再生 ─────────────────────────────────
     def _all_cells(self):
@@ -2260,6 +2476,27 @@ class OGPipelineWindow(QWidget):
         self._all_shots_dlg = AllShotsDialog(self.active_shots_parent, self)
         self._all_shots_dlg.show()
         self._all_shots_dlg.raise_()
+
+    def reveal_in_browser(self, folder):
+        """ブラウザ（Miller カラム）でフォルダまで潜って表示し、前面に出す。"""
+        if not folder or not os.path.isdir(str(folder)):
+            self.statusLabel.setText("フォルダが見つかりません: %s" % folder)
+            return
+        # 検索中だと邪魔なのでクリアし、ルートを active_root に戻してから潜る
+        try:
+            self.searchBar.blockSignals(True)
+            self.searchBar.clear()
+            self.searchBar.blockSignals(False)
+        except Exception:
+            pass
+        self.browser.set_root(self.active_root)
+        ok = self.browser.reveal_path(folder)
+        self.raise_()
+        self.activateWindow()
+        if not ok:
+            self.statusLabel.setText("ブラウザで表示できませんでした（ルート外）: %s" % folder)
+        else:
+            self.statusLabel.setText("▸  %s" % folder)
 
     def closeEvent(self, event):
         """ウィンドウを閉じる際、実行中のデコード/検索スレッドを確実に止める。
