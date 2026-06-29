@@ -23,7 +23,7 @@ from pathlib import Path
 
 try:
     from PySide2 import QtWidgets, QtCore, QtGui
-    from PySide2.QtCore import Qt, QThread, Signal, QSize, QTimer
+    from PySide2.QtCore import Qt, QThread, Signal, QSize, QTimer, QUrl
     from PySide2.QtGui import QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QLinearGradient
     from PySide2.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -36,7 +36,7 @@ try:
 except ImportError:
     try:
         from PySide6 import QtWidgets, QtCore, QtGui
-        from PySide6.QtCore import Qt, QThread, Signal, QSize, QTimer
+        from PySide6.QtCore import Qt, QThread, Signal, QSize, QTimer, QUrl
         from PySide6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QLinearGradient
         from PySide6.QtWidgets import (
             QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -52,6 +52,50 @@ except ImportError:
 # ─── 定数 ────────────────────────────────────────────────────────────────────
 MAYA_EXTENSIONS = {".ma", ".mb"}
 WINDOW_OBJECT_NAME = "OGPipelineSceneOpenerWindow"   # 多重起動検出用の安定識別名
+VIDEO_SUBDIR = "movies"                              # シーンフォルダ内の動画保存フォルダ
+VIDEO_EXTS = [".mov", ".mp4", ".avi", ".mkv", ".wmv", ".m4v"]
+
+# QtMultimedia（動画再生）。Maya 同梱 PySide には無いことがあるため任意依存とする。
+_QT_MM = None
+try:
+    from PySide2.QtMultimedia import QMediaPlayer, QMediaContent
+    from PySide2.QtMultimediaWidgets import QVideoWidget
+    _QT_MM = 2
+except Exception:
+    try:
+        from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+        from PySide6.QtMultimediaWidgets import QVideoWidget
+        _QT_MM = 6
+    except Exception:
+        _QT_MM = None
+
+
+def find_scene_video(scene_path):
+    """シーンと同名の動画を movies フォルダから探す。無ければ None。"""
+    if not scene_path:
+        return None
+    p = Path(scene_path)
+    folder = p.parent / VIDEO_SUBDIR
+    for ext in VIDEO_EXTS:
+        cand = folder / (p.stem + ext)
+        if cand.exists():
+            return str(cand)
+    return None
+
+
+def open_file_external(path):
+    """OS の既定アプリでファイルを開く。"""
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(os.path.normpath(path))   # noqa: P204
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        return True
+    except Exception as e:
+        print("[OG_Pipeline] 動画を開けませんでした:", e)
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -402,6 +446,108 @@ class ScanThread(QThread):
         self.finished_scan.emit(len(results))
 
 
+# ─── 動画プレイヤー（サイドバー） ───────────────────────────────────────────────
+class VideoPlayer(QWidget):
+    """シーンと同名のプレイブラスト動画をサイドバーで再生する。
+
+    QtMultimedia があれば埋め込み再生（ループ）、無ければ外部プレイヤーで開くボタン。
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._path = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        self._placeholder = QLabel("ファイルを選択すると\n動画を表示します")
+        self._placeholder.setAlignment(Qt.AlignCenter)
+        self._placeholder.setStyleSheet(
+            "color: #2a3045; font-size: 11px; background: #05070c; border: 1px solid #1e2435;"
+        )
+        self._placeholder.setMinimumHeight(150)
+        lay.addWidget(self._placeholder)
+
+        self._video = None
+        self._player = None
+        self._audio = None
+        if _QT_MM:
+            self._video = QVideoWidget()
+            self._video.setMinimumHeight(150)
+            self._video.setStyleSheet("background: #000;")
+            lay.addWidget(self._video)
+            self._player = QMediaPlayer()
+            self._player.setVideoOutput(self._video)
+            if _QT_MM == 6:
+                self._audio = QAudioOutput()
+                self._player.setAudioOutput(self._audio)
+                try:
+                    self._player.setLoops(QMediaPlayer.Infinite)
+                except Exception:
+                    pass
+            else:
+                self._player.mediaStatusChanged.connect(self._loop_ps2)
+            self._video.hide()
+
+        self._openBtn = QPushButton("▶  外部プレイヤーで開く")
+        self._openBtn.setObjectName("refreshBtn")
+        self._openBtn.clicked.connect(self._open_external)
+        self._openBtn.hide()
+        lay.addWidget(self._openBtn)
+
+    def _loop_ps2(self, status):
+        try:
+            if status == QMediaPlayer.EndOfMedia and self._path:
+                self._player.setPosition(0)
+                self._player.play()
+        except Exception:
+            pass
+
+    def set_video(self, path):
+        self._path = path
+        if self._player:
+            try:
+                self._player.stop()
+            except Exception:
+                pass
+        if not path:
+            if self._video:
+                self._video.hide()
+            self._openBtn.hide()
+            self._placeholder.setText("動画なし（プレイブラスト未作成）")
+            self._placeholder.show()
+            return
+        if _QT_MM and self._player:
+            self._placeholder.hide()
+            self._video.show()
+            self._openBtn.show()
+            url = QUrl.fromLocalFile(path)
+            try:
+                if _QT_MM == 6:
+                    self._player.setSource(url)
+                else:
+                    self._player.setMedia(QMediaContent(url))
+                self._player.play()
+            except Exception as e:
+                print("[OG_Pipeline] 動画再生エラー:", e)
+        else:
+            if self._video:
+                self._video.hide()
+            self._placeholder.setText("動画あり（内蔵プレイヤー非対応）\n下のボタンで再生")
+            self._placeholder.show()
+            self._openBtn.show()
+
+    def _open_external(self):
+        if self._path:
+            open_file_external(self._path)
+
+    def stop(self):
+        if self._player:
+            try:
+                self._player.stop()
+            except Exception:
+                pass
+
+
 # ─── 詳細パネル ──────────────────────────────────────────────────────────────
 class DetailPanel(QWidget):
     def __init__(self, parent=None):
@@ -419,6 +565,15 @@ class DetailPanel(QWidget):
         title.setObjectName("detailTitle")
         layout.addWidget(title)
 
+        # 動画プレイヤー（シーンと同名のプレイブラストを再生）
+        self._abs_path = ""
+        self.video = VideoPlayer()
+        vwrap = QWidget()
+        vlay = QVBoxLayout(vwrap)
+        vlay.setContentsMargins(12, 10, 12, 6)
+        vlay.addWidget(self.video)
+        layout.addWidget(vwrap)
+
         self.content = QWidget()
         self.content.setStyleSheet("background: transparent;")
         self.contentLayout = QVBoxLayout(self.content)
@@ -429,7 +584,7 @@ class DetailPanel(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self.content)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        layout.addWidget(scroll)
+        layout.addWidget(scroll, 1)
 
         self.clear()
 
@@ -441,13 +596,24 @@ class DetailPanel(QWidget):
 
     def clear(self):
         self._clear_layout()
+        self._abs_path = ""
+        if hasattr(self, "video"):
+            self.video.set_video(None)
         placeholder = QLabel("ファイルを選択すると\n詳細が表示されます")
         placeholder.setStyleSheet("color: #2a3045; font-size: 11px;")
         placeholder.setAlignment(Qt.AlignCenter)
         self.contentLayout.addWidget(placeholder)
         self.contentLayout.addStretch()
 
+    def reload_video(self):
+        """現在表示中シーンの動画を再探索して反映（プレイブラスト直後など）。"""
+        if self._abs_path:
+            self.video.set_video(find_scene_video(self._abs_path))
+
     def update_info(self, rel_path: str, abs_path: str, size: int, mtime: float):
+        self._abs_path = abs_path
+        if hasattr(self, "video"):
+            self.video.set_video(find_scene_video(abs_path))
         self._clear_layout()
         import datetime
 
@@ -1266,6 +1432,13 @@ class OGPipelineWindow(QWidget):
         self.versionUpBtn.clicked.connect(self._version_up_save)
         ab_layout.addWidget(self.versionUpBtn)
 
+        # 現在シーンを movies フォルダにプレイブラスト書き出し
+        self.playblastBtn = QPushButton("🎬  PLAYBLAST")
+        self.playblastBtn.setObjectName("refreshBtn")
+        self.playblastBtn.setToolTip("現在のシーンを movies フォルダにシーン名と同名で書き出す")
+        self.playblastBtn.clicked.connect(self._playblast_current)
+        ab_layout.addWidget(self.playblastBtn)
+
         self.importBtn = QPushButton("▤  IMPORT")
         self.importBtn.setObjectName("importBtn")
         self.importBtn.setEnabled(False)
@@ -1517,6 +1690,9 @@ class OGPipelineWindow(QWidget):
         act_import = menu.addAction("▤  インポート")
         act_folder = menu.addAction("📂  フォルダを開く")
         menu.addSeparator()
+        act_pb = menu.addAction("🎬  プレイブラスト書き出し")
+        vid = find_scene_video(path)
+        act_playvid = menu.addAction("▶  動画を再生") if vid else None
         act_ref = menu.addAction("⊟  リファレンスを編集…")
         chosen = menu.exec_(global_pos) if hasattr(menu, "exec_") else menu.exec(global_pos)
         if chosen is None:
@@ -1528,6 +1704,10 @@ class OGPipelineWindow(QWidget):
             self._import_scene()
         elif chosen == act_folder:
             self._open_in_explorer()
+        elif chosen == act_pb:
+            self._playblast(path)
+        elif act_playvid is not None and chosen == act_playvid:
+            open_file_external(vid)
         elif chosen == act_ref:
             self._edit_references(path)
 
@@ -1940,6 +2120,90 @@ class OGPipelineWindow(QWidget):
         self.statusLabel.setText(f"✓  バージョンアップ保存: {Path(new_path).name}")
         # 現在のルート配下なら一覧を更新して新バージョンを反映
         self._apply_view()
+
+    def _playblast_current(self):
+        """現在 Maya で開いているシーンをプレイブラスト書き出しする。"""
+        try:
+            import maya.cmds as cmds
+            cur = cmds.file(q=True, sceneName=True) or ""
+        except ImportError:
+            QMessageBox.information(
+                self, "プレイブラスト",
+                "Maya 内で実行すると、現在のシーンを movies フォルダに書き出します。",
+            )
+            return
+        if not cur:
+            self.statusLabel.setText("現在のシーンが未保存です（書き出し先がありません）")
+            return
+        self._playblast(cur)
+
+    def _playblast(self, scene_path):
+        """シーンを movies フォルダに「シーン名と同名」でプレイブラスト書き出しする。"""
+        try:
+            import maya.cmds as cmds
+        except ImportError:
+            QMessageBox.information(
+                self, "プレイブラスト",
+                "Maya 内で実行してください（cmds.playblast を使用します）。",
+            )
+            return
+
+        # 対象シーンが開かれていなければ開く（プレイブラストは現在ビューを撮るため）
+        cur = cmds.file(q=True, sceneName=True) or ""
+        if os.path.normcase(os.path.normpath(cur)) != os.path.normcase(os.path.normpath(scene_path)):
+            r = QMessageBox.question(
+                self, "プレイブラスト",
+                f"{Path(scene_path).name} を開いてプレイブラストします。よろしいですか？",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if r != QMessageBox.Yes:
+                return
+            self._selected_path = scene_path
+            self._open_scene()
+            cur = cmds.file(q=True, sceneName=True) or ""
+            if os.path.normcase(os.path.normpath(cur)) != os.path.normcase(os.path.normpath(scene_path)):
+                return
+
+        folder = os.path.join(os.path.dirname(scene_path), VIDEO_SUBDIR)
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except Exception as e:
+            self.statusLabel.setText(f"⚠  movies フォルダ作成失敗: {e}")
+            return
+        out_base = os.path.join(folder, Path(scene_path).stem)
+
+        try:
+            width = int(cmds.getAttr("defaultResolution.width"))
+            height = int(cmds.getAttr("defaultResolution.height"))
+            if width <= 0 or height <= 0:
+                width, height = 1280, 720
+        except Exception:
+            width, height = 1280, 720
+
+        # 環境差に強いよう複数フォーマットをフォールバックで試す
+        result = None
+        last_err = None
+        for fmt, comp in (("qt", "H.264"), ("qt", None), ("avi", None), ("movie", None)):
+            try:
+                kw = dict(filename=out_base, format=fmt, forceOverwrite=True,
+                          viewer=False, percent=100, quality=100,
+                          widthHeight=[width, height], showOrnaments=True,
+                          clearCache=True)
+                if comp:
+                    kw["compression"] = comp
+                result = cmds.playblast(**kw)
+                if result:
+                    break
+            except Exception as e:
+                last_err = e
+                continue
+
+        if result:
+            self.statusLabel.setText(f"🎬  プレイブラスト: {result}")
+            # 選択中シーンの動画ならサイドバーを更新
+            self.detailPanel.reload_video()
+        else:
+            self.statusLabel.setText(f"⚠  プレイブラスト失敗: {last_err}")
 
     def _open_in_explorer(self):
         """選択中のシーンのフォルダを OS のファイラで開く（ファイルを選択状態にする）。"""
