@@ -2164,13 +2164,34 @@ class OGPipelineWindow(QWidget):
             if os.path.normcase(os.path.normpath(cur)) != os.path.normcase(os.path.normpath(scene_path)):
                 return
 
+        import tempfile
+        import shutil
+
         folder = os.path.join(os.path.dirname(scene_path), VIDEO_SUBDIR)
         try:
             os.makedirs(folder, exist_ok=True)
         except Exception as e:
             self.statusLabel.setText(f"⚠  movies フォルダ作成失敗: {e}")
             return
-        out_base = os.path.join(folder, Path(scene_path).stem)
+
+        # 事前に空き容量を確認（"out of disk space" 回避の手がかり）
+        warn_low = []
+        for label, chk in (("出力先", folder), ("一時領域", tempfile.gettempdir())):
+            try:
+                free_mb = shutil.disk_usage(chk).free / (1024 * 1024)
+                if free_mb < 300:
+                    warn_low.append(f"{label} 残り {free_mb:.0f}MB")
+            except Exception:
+                pass
+        if warn_low:
+            r = QMessageBox.question(
+                self, "空き容量の警告",
+                "空き容量が少ないためプレイブラストが失敗する可能性があります:\n  "
+                + "\n  ".join(warn_low) + "\n\n続行しますか？",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if r != QMessageBox.Yes:
+                return
 
         try:
             width = int(cmds.getAttr("defaultResolution.width"))
@@ -2180,30 +2201,52 @@ class OGPipelineWindow(QWidget):
         except Exception:
             width, height = 1280, 720
 
-        # 環境差に強いよう複数フォーマットをフォールバックで試す
+        # まずローカル一時フォルダにエンコードし、完成後に movies へコピーする。
+        # （出力先ドライブ直書きで起きる "out of disk space"/"copy to final
+        #   destination" を切り分け・回避できる）
+        tmpdir = tempfile.mkdtemp(prefix="ogpb_")
+        tmp_base = os.path.join(tmpdir, Path(scene_path).stem).replace("\\", "/")
+
         result = None
         last_err = None
         for fmt, comp in (("qt", "H.264"), ("qt", None), ("avi", None), ("movie", None)):
             try:
-                kw = dict(filename=out_base, format=fmt, forceOverwrite=True,
+                kw = dict(filename=tmp_base, format=fmt, forceOverwrite=True,
                           viewer=False, percent=100, quality=100,
                           widthHeight=[width, height], showOrnaments=True,
                           clearCache=True)
                 if comp:
                     kw["compression"] = comp
-                result = cmds.playblast(**kw)
-                if result:
+                res = cmds.playblast(**kw)
+                if res and os.path.isfile(res):
+                    result = res
                     break
             except Exception as e:
                 last_err = e
                 continue
 
-        if result:
-            self.statusLabel.setText(f"🎬  プレイブラスト: {result}")
-            # 選択中シーンの動画ならサイドバーを更新
-            self.detailPanel.reload_video()
-        else:
-            self.statusLabel.setText(f"⚠  プレイブラスト失敗: {last_err}")
+        if not result:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            self.statusLabel.setText(
+                f"⚠  プレイブラスト失敗（エンコード）: {last_err or '一時領域の空き容量を確認してください'}"
+            )
+            return
+
+        # 完成した動画を movies フォルダへコピー（最終コピーは自前で行い、明確に判定）
+        ext = os.path.splitext(result)[1] or ".mov"
+        dest = os.path.join(folder, Path(scene_path).stem + ext)
+        try:
+            shutil.copy2(result, dest)
+        except Exception as e:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            self.statusLabel.setText(
+                f"⚠  出力先へコピーできません（空き容量／アクセス権を確認）: {e}"
+            )
+            return
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+        self.statusLabel.setText(f"🎬  プレイブラスト: {dest}")
+        self.detailPanel.reload_video()   # 選択中シーンの動画ならサイドバー更新
 
     def _open_in_explorer(self):
         """選択中のシーンのフォルダを OS のファイラで開く（ファイルを選択状態にする）。"""
