@@ -203,6 +203,40 @@ def pick_folder_media(folder):
     return None
 
 
+def _media_mtime(media):
+    """メディア（("video"/"ext", path) または ("seq", [frames])）の更新日時。"""
+    if not media:
+        return 0.0
+    kind, val = media[0], media[1]
+    try:
+        if kind == "seq":
+            return max(os.path.getmtime(f) for f in val)
+        return os.path.getmtime(val)
+    except Exception:
+        return 0.0
+
+
+def shot_stage_list(shot_folder):
+    """ショット直下の各工程フォルダ（lay, anm 等）の最新メディアを返す。
+
+    戻り値: [(stage_name, media, mtime), ...]（mtime 昇順）。
+    工程フォルダ＝ショット直下のサブフォルダ（Pipeline_Movie は除外）。
+    """
+    out = []
+    try:
+        for d in sorted(os.listdir(shot_folder)):
+            full = os.path.join(shot_folder, d)
+            if not os.path.isdir(full) or d == VIDEO_SUBDIR:
+                continue
+            media = pick_folder_media(full)
+            if media:
+                out.append((d, media, _media_mtime(media)))
+    except Exception:
+        pass
+    out.sort(key=lambda s: s[2])
+    return out
+
+
 def open_file_external(path):
     """OS の既定アプリでファイルを開く。"""
     try:
@@ -941,20 +975,33 @@ class GridVideoCell(QWidget):
     """
     CELL_W, CELL_H = 300, 175
 
-    def __init__(self, shot_name, media, parent=None):
+    def __init__(self, title, media, stage="", on_click=None, payload=None, parent=None):
         super().__init__(parent)
         self.setFixedWidth(self.CELL_W)
         self._cv_thread = None
         self._frames = []
         self._idx = 0
         self._seq_timer = None
+        self._on_click = on_click
+        self._payload = payload
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(2)
 
-        name = QLabel(shot_name)
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        name = QLabel(title)
         name.setStyleSheet("color: #e8c87a; font-size: 11px; font-weight: bold;")
-        lay.addWidget(name)
+        head.addWidget(name, 1)
+        if stage:
+            badge = QLabel(stage)
+            badge.setStyleSheet("color: #0f1117; background: #e8a838; border-radius: 3px;"
+                                " padding: 1px 6px; font-size: 9px; font-weight: bold;")
+            head.addWidget(badge)
+        lay.addLayout(head)
+
+        if on_click:
+            self.setCursor(Qt.PointingHandCursor)
 
         self._view = QLabel()
         self._view.setAlignment(Qt.AlignCenter)
@@ -1058,79 +1105,186 @@ class GridVideoCell(QWidget):
     def stop(self):
         self.pause()
 
+    def mousePressEvent(self, event):
+        if self._on_click:
+            try:
+                self._on_click(self._payload)
+            except Exception:
+                pass
+        super().mousePressEvent(event)
+
 
 class AllShotsDialog(QDialog):
-    """全ショットの最新動画をグリッドで一覧・自動再生する（OGREF 風）。"""
-    COLS = 4
+    """全ショットの最新動画をグリッドで一覧（工程バッジ・工程ソート）。
+
+    タイル選択で、右サイドバーにそのショットの工程ごとの最新動画を表示する。
+    """
+    COLS = 3
 
     def __init__(self, shots_parent, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.Window)
         self.setWindowTitle("All Shots — 最新動画一覧")
-        self.setMinimumSize(1000, 680)
+        self.setMinimumSize(1100, 700)
         self.setStyleSheet(STYLE)
-        self._cells = []
+        self._shots_parent = shots_parent
+        self._sort_mode = "shot"
+        self._cells = []        # グリッド（ショット）タイル
+        self._side_cells = []   # サイドバー（工程）タイル
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        shots = []
+        # ── ヘッダー（タイトル＋ソート） ──
+        hbar = QWidget()
+        hbar.setObjectName("toolbar")
+        hl = QHBoxLayout(hbar)
+        hl.setContentsMargins(10, 6, 10, 6)
+        title = QLabel("◈  ALL SHOTS")
+        title.setObjectName("appTitle")
+        title.setStyleSheet("font-size: 14px; color: #e8a838; letter-spacing: 2px;")
+        hl.addWidget(title)
+        hl.addStretch()
+        hl.addWidget(QLabel("並び替え:"))
+        self._sortCombo = QComboBox()
+        self._sortCombo.addItems(["ショット名", "工程"])
+        self._sortCombo.currentTextChanged.connect(self._on_sort_changed)
+        hl.addWidget(self._sortCombo)
+        outer.addWidget(hbar)
+
+        # ── 本体（左:グリッド / 右:工程サイドバー） ──
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        self._grid_content = QWidget()
+        self._grid = QGridLayout(self._grid_content)
+        self._grid.setContentsMargins(10, 10, 10, 10)
+        self._grid.setSpacing(10)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setWidget(self._grid_content)
+        self._scroll.verticalScrollBar().valueChanged.connect(self._update_visible)
+        splitter.addWidget(self._scroll)
+
+        side = QWidget()
+        side.setObjectName("detailPanel")
+        sv = QVBoxLayout(side)
+        sv.setContentsMargins(0, 0, 0, 0)
+        sv.setSpacing(0)
+        self._sideTitle = QLabel("◈  工程別（タイルを選択）")
+        self._sideTitle.setObjectName("detailTitle")
+        sv.addWidget(self._sideTitle)
+        self._side_content = QWidget()
+        self._side_layout = QVBoxLayout(self._side_content)
+        self._side_layout.setContentsMargins(10, 10, 10, 10)
+        self._side_layout.setSpacing(10)
+        self._side_layout.addStretch()
+        side_scroll = QScrollArea()
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setWidget(self._side_content)
+        side_scroll.verticalScrollBar().valueChanged.connect(self._update_visible)
+        sv.addWidget(side_scroll, 1)
+        splitter.addWidget(side)
+        splitter.setSizes([760, 340])
+        outer.addWidget(splitter, 1)
+
+        self._foot = QLabel("")
+        self._foot.setStyleSheet("color: #3a4055; font-size: 10px; padding: 4px 10px;")
+        outer.addWidget(self._foot)
+
+        # ── ショットデータ収集（各ショット = 最新工程のメディア＋工程名） ──
+        self._shot_data = []   # [{name, folder, media, stage}]
         try:
-            for d in sorted(os.listdir(shots_parent)):
-                full = os.path.join(shots_parent, d)
-                if os.path.isdir(full):
-                    shots.append((d, full))
+            names = sorted(os.listdir(shots_parent))
         except Exception:
-            pass
-
-        head = QLabel(f"◈  ALL SHOTS   —   {len(shots)} shots   |   {shots_parent}")
-        head.setObjectName("detailTitle")
-        outer.addWidget(head)
-
-        content = QWidget()
-        grid = QGridLayout(content)
-        grid.setContentsMargins(10, 10, 10, 10)
-        grid.setSpacing(10)
-        r = c = 0
-        with_video = 0
-        for name, full in shots:
-            media = pick_folder_media(full)
+            names = []
+        for d in names:
+            full = os.path.join(shots_parent, d)
+            if not os.path.isdir(full):
+                continue
+            stages = shot_stage_list(full)
+            if stages:
+                stage_name, media, _mt = stages[-1]   # 最新工程
+            else:
+                media, stage_name = pick_folder_media(full), ""
             if media:
-                with_video += 1
-            cell = GridVideoCell(name, media, parent=content)
-            grid.addWidget(cell, r, c)
+                self._shot_data.append(
+                    {"name": d, "folder": full, "media": media, "stage": stage_name})
+
+        self._foot.setText(
+            f"動画あり {len(self._shot_data)} / {len(names)} ショット　"
+            "（表示中のみ再生／タイル選択で工程別を表示）")
+        self._rebuild_grid()
+
+    # ── グリッド構築・ソート ────────────────────────────
+    def _on_sort_changed(self, text):
+        self._sort_mode = "stage" if text == "工程" else "shot"
+        self._rebuild_grid()
+
+    def _clear_cells(self, cells, layout):
+        for cell in cells:
+            try:
+                cell.stop()
+                cell.setParent(None)
+                cell.deleteLater()
+            except Exception:
+                pass
+        del cells[:]
+
+    def _rebuild_grid(self):
+        self._clear_cells(self._cells, self._grid)
+        data = list(self._shot_data)
+        if self._sort_mode == "stage":
+            data.sort(key=lambda s: (s["stage"].lower(), s["name"].lower()))
+        else:
+            data.sort(key=lambda s: s["name"].lower())
+        r = c = 0
+        for s in data:
+            cell = GridVideoCell(s["name"], s["media"], stage=s["stage"],
+                                 on_click=self._select_shot, payload=s["folder"],
+                                 parent=self._grid_content)
+            self._grid.addWidget(cell, r, c)
             self._cells.append(cell)
             c += 1
             if c >= self.COLS:
                 c = 0
                 r += 1
-        grid.setRowStretch(r + 1, 1)
+        self._grid.setRowStretch(r + 1, 1)
+        QTimer.singleShot(0, self._update_visible)
 
-        self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setWidget(content)
-        self._scroll.verticalScrollBar().valueChanged.connect(self._update_visible)
-        outer.addWidget(self._scroll, 1)
+    # ── 工程別サイドバー ───────────────────────────────
+    def _select_shot(self, folder):
+        self._clear_cells(self._side_cells, self._side_layout)
+        # 末尾の stretch を取り除いてから積み直す
+        while self._side_layout.count():
+            it = self._side_layout.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        self._sideTitle.setText(f"◈  {Path(folder).name} — 工程別")
+        stages = shot_stage_list(folder)
+        if not stages:
+            self._side_layout.addWidget(QLabel("工程フォルダに動画が見つかりません"))
+        for stage_name, media, _mt in reversed(stages):   # 新しい工程を上に
+            cell = GridVideoCell(stage_name, media, parent=self._side_content)
+            self._side_layout.addWidget(cell)
+            self._side_cells.append(cell)
+        self._side_layout.addStretch()
+        QTimer.singleShot(0, self._update_visible)
 
-        foot = QLabel(f"動画あり {with_video} / {len(shots)} ショット　"
-                      "（表示中のセルのみ再生して負荷を抑えています）")
-        foot.setStyleSheet("color: #3a4055; font-size: 10px; padding: 4px 10px;")
-        outer.addWidget(foot)
+    # ── 表示中のみ再生 ─────────────────────────────────
+    def _all_cells(self):
+        return self._cells + self._side_cells
 
     def _update_visible(self, *args):
-        """ビューポート内に見えているセルだけ再生し、他は一時停止する。"""
-        if not self.isActiveWindow() and not self.isVisible():
+        if not self.isVisible():
             return
-        for cell in self._cells:
+        for cell in self._all_cells():
             try:
-                visible = (self.isVisible() and not cell.visibleRegion().isEmpty())
+                visible = not cell.visibleRegion().isEmpty()
             except Exception:
                 visible = True
-            if visible:
-                cell.play()
-            else:
-                cell.pause()
+            cell.play() if visible else cell.pause()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1141,27 +1295,25 @@ class AllShotsDialog(QDialog):
         self._update_visible()
 
     def changeEvent(self, event):
-        # ウィンドウが非アクティブ/最小化されたら全停止（裏で回り続けない）
         try:
-            from_active = event.type() == event.WindowStateChange or \
-                event.type() == event.ActivationChange
+            relevant = event.type() in (event.WindowStateChange, event.ActivationChange)
         except Exception:
-            from_active = False
+            relevant = False
         super().changeEvent(event)
-        if from_active:
+        if relevant:
             if self.isActiveWindow() and not self.isMinimized():
                 self._update_visible()
             else:
-                for cell in self._cells:
+                for cell in self._all_cells():
                     cell.pause()
 
     def hideEvent(self, event):
-        for cell in self._cells:
+        for cell in self._all_cells():
             cell.pause()
         super().hideEvent(event)
 
     def stop_all(self):
-        for cell in self._cells:
+        for cell in self._all_cells():
             cell.stop()
 
     def closeEvent(self, event):
