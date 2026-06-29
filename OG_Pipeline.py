@@ -87,40 +87,18 @@ def find_scene_video(scene_path):
 
 
 def find_scene_sequence(scene_path):
-    """シーンと同名の連番画像（ソート済みパスのリスト）を返す。無ければ None。
-
-    候補の場所を順に探す（出力先の変遷・運用差に対応）:
-      <sceneフォルダ>/Pipeline_Movie/<stem>/   （現行のプレイブラスト出力先）
-      <sceneフォルダ>/movies/<stem>/           （旧出力先）
-      <sceneフォルダ>/<stem>/                   （シーンフォルダ直下の同名フォルダ）
-      <sceneフォルダ>/Pipeline_Movie/           （フォルダ直下に <stem>.####.ext）
-      <sceneフォルダ>/movies/
-    フレームは「シーン名で始まる」画像のみを対象にする。
-    """
+    """Pipeline_Movie/<シーン名>/ 内の連番画像（ソート済みパスのリスト）を返す。無ければ None。"""
     if not scene_path:
         return None
     p = Path(scene_path)
-    stem = p.stem
-    candidates = [
-        p.parent / VIDEO_SUBDIR / stem,
-        p.parent / "movies" / stem,
-        p.parent / stem,
-        p.parent / VIDEO_SUBDIR,
-        p.parent / "movies",
-    ]
-    for d in candidates:
-        try:
-            if not d.is_dir():
-                continue
-            frames = sorted(
-                str(f) for f in d.iterdir()
-                if f.is_file() and f.suffix.lower() in SEQ_EXTS
-                and f.name.startswith(stem)
-            )
-            if frames:
-                return frames
-        except Exception:
-            continue
+    seq_dir = p.parent / VIDEO_SUBDIR / p.stem
+    if seq_dir.is_dir():
+        frames = sorted(
+            str(f) for f in seq_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in SEQ_EXTS
+        )
+        if frames:
+            return frames
     return None
 
 
