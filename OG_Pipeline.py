@@ -1039,7 +1039,7 @@ class GridVideoCell(QWidget):
     操作: ホバーでハイライト / 中ボタンドラッグでスクラブ / 右下の小ボタンで再生停止 /
     下部のボタンで工程フォルダへドリル・エクスプローラーで開く。
     """
-    CELL_W, CELL_H = 300, 175
+    CELL_W, CELL_H = 208, 98
 
     def __init__(self, title, media, stage="", on_click=None, payload=None,
                  title_color=None, folder=None, on_drill=None, parent=None):
@@ -1094,7 +1094,7 @@ class GridVideoCell(QWidget):
         # 右下の小さな再生/停止ボタン（view の上にオーバーレイ）
         self._toggleBtn = QPushButton("▶", self)
         self._toggleBtn.setCursor(Qt.PointingHandCursor)
-        self._toggleBtn.setFixedSize(28, 22)
+        self._toggleBtn.setFixedSize(24, 20)
         self._toggleBtn.setToolTip("再生 / 停止")
         self._toggleBtn.setStyleSheet(
             "QPushButton { background: rgba(15,17,23,190); color: #e8c87a;"
@@ -1138,11 +1138,11 @@ class GridVideoCell(QWidget):
             brow = QHBoxLayout()
             brow.setContentsMargins(0, 2, 0, 0)
             brow.setSpacing(4)
-            drillBtn = QPushButton("⮞ 工程フォルダ")
+            drillBtn = QPushButton("⮞ 工程")
             drillBtn.setObjectName("refreshBtn")
             drillBtn.setToolTip("ブラウザでこの工程フォルダを開く")
             drillBtn.clicked.connect(lambda _=False, f=folder: self._do_drill(f))
-            openBtn = QPushButton("📂 フォルダ")
+            openBtn = QPushButton("📂 開く")
             openBtn.setObjectName("refreshBtn")
             openBtn.setToolTip("エクスプローラーでフォルダを開く")
             openBtn.clicked.connect(lambda _=False, f=folder: reveal_in_explorer(f))
@@ -1384,13 +1384,15 @@ class AllShotsDialog(QDialog):
 
     タイル選択で、右サイドバーにそのショットの工程ごとの最新動画を表示する。
     """
-    COLS = 3
+    COLS = 5
 
     def __init__(self, shots_parent, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.Window)
         self.setWindowTitle("All Shots — 最新動画一覧")
-        self.setMinimumSize(1100, 700)
+        self.setMinimumSize(1200, 700)
+        # グリッドに 5 列が収まり、5 行ぶんが見えるサイズで開く
+        self.resize(1480, 1010)
         self.setStyleSheet(STYLE)
         self._shots_parent = shots_parent
         self._sort_mode = "shot"
@@ -1451,7 +1453,8 @@ class AllShotsDialog(QDialog):
         side_scroll.verticalScrollBar().valueChanged.connect(self._update_visible)
         sv.addWidget(side_scroll, 1)
         splitter.addWidget(side)
-        splitter.setSizes([760, 340])
+        # グリッド側に 5 列ぶん（約 1130px）を割り当てる
+        splitter.setSizes([1130, 330])
         outer.addWidget(splitter, 1)
 
         self._foot = QLabel("")
