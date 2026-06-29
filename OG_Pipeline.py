@@ -2207,9 +2207,18 @@ class OGPipelineWindow(QWidget):
         tmpdir = tempfile.mkdtemp(prefix="ogpb_")
         tmp_base = os.path.join(tmpdir, Path(scene_path).stem).replace("\\", "/")
 
+        # この環境がサポートするフォーマットだけを試す。qt は最終コピーで失敗する
+        # 環境があるため、avi / movie を優先し、qt は最後に回す。
+        try:
+            supported = set(cmds.playblast(q=True, format=True) or [])
+        except Exception:
+            supported = set()
+        order = [("avi", None), ("movie", None), ("qt", "H.264"), ("qt", None)]
+        attempts = [(f, c) for f, c in order if not supported or f in supported] or [("qt", None)]
+
         result = None
         last_err = None
-        for fmt, comp in (("qt", "H.264"), ("qt", None), ("avi", None), ("movie", None)):
+        for fmt, comp in attempts:
             try:
                 kw = dict(filename=tmp_base, format=fmt, forceOverwrite=True,
                           viewer=False, percent=100, quality=100,
