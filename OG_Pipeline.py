@@ -2238,8 +2238,9 @@ class OGPipelineWindow(QWidget):
             attempts += [("qt", "MPEG-4 Video"), ("qt", "H.264"), ("qt", None)]
 
         result = None
-        last_err = None
+        log = []   # 各試行の結果を記録（失敗時に表示して原因を特定する）
         for fmt, comp in attempts:
+            label = f"{fmt}/{comp or '既定'}"
             try:
                 kw = dict(filename=tmp_base, format=fmt, forceOverwrite=True,
                           viewer=False, percent=100, quality=100,
@@ -2250,16 +2251,27 @@ class OGPipelineWindow(QWidget):
                 res = cmds.playblast(**kw)
                 if res and os.path.isfile(res):
                     result = res
+                    log.append(f"  ✓ {label} → {os.path.basename(res)}")
                     break
+                log.append(f"  ✗ {label}: ファイル未生成 (返り値={res})")
             except Exception as e:
-                last_err = e
+                log.append(f"  ✗ {label}: {e}")
                 continue
+
+        print("[OG_Pipeline] playblast 試行:\n" + "\n".join(log))
 
         if not result:
             shutil.rmtree(tmpdir, ignore_errors=True)
-            self.statusLabel.setText(
-                f"⚠  プレイブラスト失敗（エンコード）: {last_err or '一時領域の空き容量を確認してください'}"
+            detail = "\n".join(log) or "(試行なし)"
+            QMessageBox.warning(
+                self, "プレイブラスト失敗",
+                "動画を書き出せませんでした。各フォーマットの結果:\n\n" + detail +
+                "\n\nMaya のスクリプトエディタに利用可能コーデックを確認:\n"
+                "  import maya.cmds as cmds\n"
+                "  print(cmds.playblast(q=True, format=True))\n"
+                "  print(cmds.playblast(q=True, compression=True))",
             )
+            self.statusLabel.setText("⚠  プレイブラスト失敗（詳細はダイアログ参照）")
             return
 
         # 完成した動画を movies フォルダへコピー（最終コピーは自前で行い、明確に判定）
