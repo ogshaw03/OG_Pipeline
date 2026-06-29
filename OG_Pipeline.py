@@ -381,6 +381,53 @@ class Cv2VideoThread(QThread):
         self._running = False
 
 
+# 実行中スレッドを保持しておくための保管庫。
+# QThread を「実行中のまま」破棄すると Qt がプロセスを abort する（＝Maya クラッシュ）。
+# stop() は wait しない設計なので、終了するまで参照を保持し finished で自己破棄させる。
+_LIVE_CV_THREADS = set()
+
+
+def _release_cv_thread(th):
+    """cv2 スレッドを安全に停止・解放する。
+
+    実行中の QThread が親ウィジェット破棄に巻き込まれて落ちないよう、
+    親から切り離し→保管庫で保持→finished で deleteLater、という流れにする。
+    GUI はブロックしない（wait しない）。
+    """
+    if th is None:
+        return
+    try:
+        th.frameReady.disconnect()
+    except Exception:
+        pass
+    try:
+        th.stop()                       # _running = False（次ループで抜ける）
+    except Exception:
+        pass
+    try:
+        th.setParent(None)              # 親(セル/プレイヤー)破棄に巻き込まれないよう切り離す
+    except Exception:
+        pass
+    _LIVE_CV_THREADS.add(th)
+
+    def _drop(_th=th):
+        _LIVE_CV_THREADS.discard(_th)
+        try:
+            _th.deleteLater()
+        except Exception:
+            pass
+    try:
+        th.finished.connect(_drop)
+    except Exception:
+        pass
+    # 既に終了済みなら即解放（finished が飛ばないケースの保険）。
+    try:
+        if not th.isRunning():
+            _drop()
+    except Exception:
+        pass
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  ルート設定の永続化（JSON）
 #  Playblast ツールと同じ方針: optionVar ではなく通常ファイルに保存する。
@@ -799,14 +846,7 @@ class VideoPlayer(QWidget):
     def _stop_all(self):
         self._timer.stop()
         if self._cv_thread is not None:
-            try:
-                self._cv_thread.frameReady.disconnect()
-            except Exception:
-                pass
-            try:
-                self._cv_thread.stop()
-            except Exception:
-                pass
+            _release_cv_thread(self._cv_thread)
             self._cv_thread = None
 
     def clear_player(self):
@@ -1083,7 +1123,6 @@ class GridVideoCell(QWidget):
         try:
             self._cv_thread = Cv2VideoThread(path, max_w=self.CELL_W, parent=self)
             self._cv_thread.frameReady.connect(self._paint)
-            self._cv_thread.finished.connect(self._cv_thread.deleteLater)
             self._cv_thread.start()
             return True
         except Exception:
@@ -1092,14 +1131,7 @@ class GridVideoCell(QWidget):
 
     def _stop_thread(self):
         if self._cv_thread is not None:
-            try:
-                self._cv_thread.frameReady.disconnect()
-            except Exception:
-                pass
-            try:
-                self._cv_thread.stop()
-            except Exception:
-                pass
+            _release_cv_thread(self._cv_thread)
             self._cv_thread = None
 
     def stop(self):
@@ -2200,6 +2232,32 @@ class OGPipelineWindow(QWidget):
         self._all_shots_dlg = AllShotsDialog(self.active_shots_parent, self)
         self._all_shots_dlg.show()
         self._all_shots_dlg.raise_()
+
+    def closeEvent(self, event):
+        """ウィンドウを閉じる際、実行中のデコード/検索スレッドを確実に止める。
+
+        実行中の QThread が破棄されると Qt がプロセスごと落ちる（＝Maya クラッシュ）。
+        埋め込みプレイヤー・全ショットダイアログ・検索スレッドを明示的に停止する。
+        """
+        try:
+            self.detailPanel.video.stop()
+        except Exception:
+            pass
+        dlg = getattr(self, "_all_shots_dlg", None)
+        if dlg is not None:
+            try:
+                dlg.stop_all()
+                dlg.close()
+            except Exception:
+                pass
+        if self._scan_thread is not None and self._scan_thread.isRunning():
+            try:
+                self._scan_thread.requestInterruption()
+                self._scan_thread.quit()
+                self._scan_thread.wait(3000)
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     def _install_cv2(self):
         r = QMessageBox.question(
