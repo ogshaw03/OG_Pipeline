@@ -2395,8 +2395,20 @@ def main():
 
 
 # ─── スタンドアロン実行（Maya 外での単体テスト用） ──────────────────────────────
+# 注意: ファイル全体を Maya のスクリプトエディタに貼り付けて実行すると __name__ は
+# "__main__" になる。その場合 sys.exit(app.exec_()) を実行すると Maya 上で
+# SystemExit が発生するため、Maya 内では main() を呼ぶだけにする。
 if __name__ == "__main__":
-    app = QApplication.instance() or QApplication(sys.argv)
-    window = OGPipelineWindow()
-    window.show()
-    sys.exit(app.exec_() if hasattr(app, "exec_") else app.exec())
+    try:
+        import maya.cmds as _cmds  # noqa: F401
+        _in_maya = True
+    except ImportError:
+        _in_maya = False
+
+    if _in_maya:
+        main()
+    else:
+        app = QApplication.instance() or QApplication(sys.argv)
+        window = OGPipelineWindow()
+        window.show()
+        sys.exit(app.exec_() if hasattr(app, "exec_") else app.exec())
