@@ -1039,7 +1039,7 @@ class GridVideoCell(QWidget):
     操作: ホバーでハイライト / 中ボタンドラッグでスクラブ / 右下の小ボタンで再生停止 /
     下部のボタンで工程フォルダへドリル・エクスプローラーで開く。
     """
-    CELL_W, CELL_H = 208, 98
+    CELL_W, CELL_H = 208, 90
 
     def __init__(self, title, media, stage="", on_click=None, payload=None,
                  title_color=None, folder=None, on_drill=None, parent=None):
@@ -1133,17 +1133,23 @@ class GridVideoCell(QWidget):
         if not self._playable():
             self._toggleBtn.hide()
 
-        # 下部ボタン: 工程フォルダへドリル / エクスプローラーで開く
+        # 下部ボタン: 工程フォルダへドリル / エクスプローラーで開く（小型）
         if folder:
             brow = QHBoxLayout()
-            brow.setContentsMargins(0, 2, 0, 0)
-            brow.setSpacing(4)
+            brow.setContentsMargins(0, 1, 0, 0)
+            brow.setSpacing(3)
+            mini_btn = ("QPushButton { background: #1a2030; color: #9aa6c0;"
+                        " border: 1px solid #2a3147; border-radius: 3px;"
+                        " font-size: 10px; padding: 1px 4px; }"
+                        "QPushButton:hover { background: #232b40; color: #e8c87a; }")
             drillBtn = QPushButton("⮞ 工程")
-            drillBtn.setObjectName("refreshBtn")
+            drillBtn.setFixedHeight(17)
+            drillBtn.setStyleSheet(mini_btn)
             drillBtn.setToolTip("ブラウザでこの工程フォルダを開く")
             drillBtn.clicked.connect(lambda _=False, f=folder: self._do_drill(f))
             openBtn = QPushButton("📂 開く")
-            openBtn.setObjectName("refreshBtn")
+            openBtn.setFixedHeight(17)
+            openBtn.setStyleSheet(mini_btn)
             openBtn.setToolTip("エクスプローラーでフォルダを開く")
             openBtn.clicked.connect(lambda _=False, f=folder: reveal_in_explorer(f))
             brow.addWidget(drillBtn, 1)
@@ -1390,9 +1396,9 @@ class AllShotsDialog(QDialog):
         super().__init__(parent)
         self.setWindowFlags(Qt.Window)
         self.setWindowTitle("All Shots — 最新動画一覧")
-        self.setMinimumSize(1200, 700)
+        self.setMinimumSize(1200, 640)
         # グリッドに 5 列が収まり、5 行ぶんが見えるサイズで開く
-        self.resize(1480, 1010)
+        self.resize(1480, 880)
         self.setStyleSheet(STYLE)
         self._shots_parent = shots_parent
         self._sort_mode = "shot"
@@ -1515,12 +1521,14 @@ class AllShotsDialog(QDialog):
                                  on_click=self._select_shot, payload=s["folder"],
                                  folder=s["stage_folder"], on_drill=self._drill_to,
                                  parent=self._grid_content)
-            self._grid.addWidget(cell, r, c)
+            self._grid.addWidget(cell, r, c, Qt.AlignLeft | Qt.AlignTop)
             self._cells.append(cell)
             c += 1
             if c >= self.COLS:
                 c = 0
                 r += 1
+        # 余ったスペースを右・下へ逃がして、タイルを左上詰めにする
+        self._grid.setColumnStretch(self.COLS, 1)
         self._grid.setRowStretch(r + 1, 1)
         QTimer.singleShot(0, self._update_visible)
 
