@@ -153,6 +153,54 @@ def find_latest_video_under(folder):
     return best[1] if best else None
 
 
+def find_latest_sequence_under(folder):
+    """フォルダ配下で最新の連番画像（同一フォルダ内の画像群）を返す。無ければ None。
+
+    工程フォルダ／ショットフォルダ配下の Pipeline_Movie/<stem>/ などを再帰探索し、
+    最も新しいフレームを含むフォルダの連番（ソート済み）を返す。
+    """
+    if not folder or not os.path.isdir(folder):
+        return None
+    best = None  # (mtime, dirpath)
+    for cur, dirs, files in os.walk(folder):
+        imgs = [f for f in files if os.path.splitext(f)[1].lower() in SEQ_EXTS]
+        if not imgs:
+            continue
+        try:
+            m = max(os.path.getmtime(os.path.join(cur, f)) for f in imgs)
+        except Exception:
+            m = 0.0
+        if best is None or m > best[0]:
+            best = (m, cur)
+    if not best:
+        return None
+    d = best[1]
+    frames = sorted(os.path.join(d, f) for f in os.listdir(d)
+                    if os.path.splitext(f)[1].lower() in SEQ_EXTS)
+    return frames or None
+
+
+def pick_folder_media(folder):
+    """選択フォルダ配下の再生対象を決める。
+
+    優先順位:
+      - cv2 が使える & 動画あり          → ("video", path)   … cv2 で埋め込み再生
+      - 連番あり                          → ("seq", [frames]) … フリップブック再生
+      - 動画はあるが cv2 無し & 連番無し  → ("ext", path)     … 外部プレイヤーのみ
+      - どれも無し                        → None
+    cv2 が無い場合は「連番」を優先フォールバックにする。
+    """
+    video = find_latest_video_under(folder)
+    seq = find_latest_sequence_under(folder)
+    if _HAS_CV2 and video:
+        return ("video", video)
+    if seq:
+        return ("seq", seq)
+    if video:
+        return ("ext", video)
+    return None
+
+
 def open_file_external(path):
     """OS の既定アプリでファイルを開く。"""
     try:
@@ -812,6 +860,10 @@ class VideoPlayer(QWidget):
             pass
 
     def set_video(self, path):
+        """動画ファイルを再生。cv2 があれば埋め込み、無ければ外部ボタン。
+
+        ※ Maya 同梱 Qt の QtMultimedia は再生不可かつ重いため使用しない。
+        """
         self._stop_all()
         self._frames = []
         self._counter.hide()
@@ -821,35 +873,23 @@ class VideoPlayer(QWidget):
         if not path:
             self.clear_player()
             return
-        # 優先: cv2（この Maya では QtMultimedia が再生不可なため）
         if _HAS_CV2 and self._start_cv2(path):
             return
-        if _QT_MM and self._player:
-            # フレーム到達まではプレースホルダ表示（黒画面で固まらせない）
-            self._frameLabel.hide()
-            self._frameLabel.clear()
-            self._placeholder.setText("動画を読み込み中…")
-            self._placeholder.show()
-            self._openBtn.show()
-            url = QUrl.fromLocalFile(path)
-            try:
-                if _QT_MM == 6:
-                    self._player.setSource(url)
-                else:
-                    self._player.setMedia(QMediaContent(url))
-                self._player.play()
-                token = self._video_token
-                QTimer.singleShot(1800, lambda: self._video_watchdog(token))
-            except Exception:
-                self._video_unavailable()
-        else:
-            self._frameLabel.hide()
-            self._placeholder.setText(
-                "この環境では mp4 を埋め込み再生できません。\n"
-                "［外部プレイヤーで開く］、または cv2 を導入してください。"
-            )
-            self._placeholder.show()
-            self._openBtn.show()
+        self.set_external(path)
+
+    def set_external(self, path):
+        """埋め込み再生せず、外部プレイヤーで開くボタンのみ表示する。"""
+        self._stop_all()
+        self._path = path
+        self._frames = []
+        self._counter.hide()
+        self._frameLabel.hide()
+        self._placeholder.setText(
+            "mp4 は埋め込み再生できません（cv2 未導入）。\n"
+            "［外部プレイヤーで開く］、または［mp4再生を有効化］で cv2 を導入してください。"
+        )
+        self._placeholder.show()
+        self._openBtn.show()
 
     # ── cv2 による mp4 再生（連番と同じ QLabel に描画） ──────
     def _start_cv2(self, path):
@@ -904,17 +944,20 @@ class VideoPlayer(QWidget):
 
 # ─── 全ショット動画一覧（グリッド・自動再生） ───────────────────────────────────
 class GridVideoCell(QWidget):
-    """グリッド内の1セル: ショット名＋最新動画をループ自動再生（ミュート）。"""
+    """グリッド内の1セル。media = pick_folder_media() の結果。
+
+    QtMultimedia は使わない（Maya で再生不可かつ重い）。cv2 動画 / 連番 / 外部のみ。
+    """
     CELL_W, CELL_H = 300, 175
 
-    def __init__(self, shot_name, video_path, on_select=None, parent=None):
+    def __init__(self, shot_name, media, parent=None):
         super().__init__(parent)
         self.setFixedWidth(self.CELL_W)
-        self._player = None
-        self._audio = None
-        self._sink = None
-        self._surface = None
-        self._path = video_path
+        self._cap = None
+        self._cv_timer = None
+        self._frames = []
+        self._idx = 0
+        self._seq_timer = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(2)
@@ -923,106 +966,65 @@ class GridVideoCell(QWidget):
         name.setStyleSheet("color: #e8c87a; font-size: 11px; font-weight: bold;")
         lay.addWidget(name)
 
-        vh = self.CELL_H
         self._view = QLabel()
         self._view.setAlignment(Qt.AlignCenter)
-        self._view.setFixedHeight(vh)
+        self._view.setFixedHeight(self.CELL_H)
         self._view.setStyleSheet("background: #000; color: #3a4055; border: 1px solid #1e2435;")
         lay.addWidget(self._view)
 
-        self._got_frame = False
-        self._cap = None
-        self._cv_timer = None
-        if video_path and _HAS_CV2 and self._start_cv2(video_path):
-            sub = QLabel(Path(video_path).name)
-        elif video_path and _QT_MM:
-            self._view.setText("読み込み中…")
-            self._player = QMediaPlayer(self)
-            try:
-                self._player.error.connect(lambda *a: self._fallback())
-            except Exception:
-                pass
-            url = QUrl.fromLocalFile(video_path)
-            if _QT_MM == 6:
-                self._sink = QVideoSink(self)
-                self._player.setVideoSink(self._sink)
-                self._sink.videoFrameChanged.connect(self._on_frame_ps6)
-                self._audio = QAudioOutput(self)
-                self._audio.setMuted(True)
-                self._player.setAudioOutput(self._audio)
-                try:
-                    self._player.setLoops(QMediaPlayer.Infinite)
-                except Exception:
-                    pass
-                self._player.setSource(url)
-            else:
-                self._surface = _FrameSurface(self)
-                self._surface.newImage.connect(self._paint)
-                self._player.setVideoOutput(self._surface)
-                try:
-                    self._player.setMuted(True)
-                except Exception:
-                    pass
-                self._player.mediaStatusChanged.connect(self._loop)
-                self._player.setMedia(QMediaContent(url))
-            self._player.play()
-            QTimer.singleShot(1800, self._check)
-            sub = QLabel(Path(video_path).name)
+        kind = media[0] if media else None
+        if kind == "video":            # cv2 で再生
+            if not self._start_cv2(media[1]):
+                self._view.setText("再生不可")
+            sub = Path(media[1]).name
+        elif kind == "seq":            # 連番フリップブック
+            self._frames = media[1]
+            self._seq_timer = QTimer(self)
+            self._seq_timer.timeout.connect(self._next_seq)
+            self._show_seq(0)
+            if len(self._frames) > 1:
+                self._seq_timer.start(100)   # 約10fps
+            sub = "連番 %d 枚" % len(self._frames)
+        elif kind == "ext":            # 外部のみ
+            self._view.setText("外部で再生")
+            btn = QPushButton("▶  外部で開く")
+            btn.setObjectName("refreshBtn")
+            btn.clicked.connect(lambda _=False, p=media[1]: open_file_external(p))
+            lay.addWidget(btn)
+            sub = Path(media[1]).name
         else:
-            self._view.setText("動画なし" if not video_path else "再生不可\n外部で開く")
-            if video_path:
-                btn = QPushButton("▶  外部で開く")
-                btn.setObjectName("refreshBtn")
-                btn.clicked.connect(lambda: open_file_external(video_path))
-                lay.addWidget(btn)
-            sub = QLabel(Path(video_path).name if video_path else "—")
-        sub.setStyleSheet("color: #4a5568; font-size: 9px;")
-        sub.setWordWrap(True)
-        lay.addWidget(sub)
+            self._view.setText("動画なし")
+            sub = "—"
+        s = QLabel(sub)
+        s.setStyleSheet("color: #4a5568; font-size: 9px;")
+        s.setWordWrap(True)
+        lay.addWidget(s)
 
     def _paint(self, img):
         try:
             if img and not img.isNull():
-                self._got_frame = True
                 self._view.setPixmap(QPixmap.fromImage(img).scaled(
                     self.CELL_W - 8, self.CELL_H, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         except Exception:
             pass
 
-    def _check(self):
-        # フレームが来ていなければ埋め込み不可 → 外部で開くボタンに切り替え
-        if not self._got_frame:
-            self._fallback()
+    # 連番
+    def _show_seq(self, i):
+        try:
+            pm = QPixmap(self._frames[i])
+            if not pm.isNull():
+                self._view.setPixmap(pm.scaled(self.CELL_W - 8, self.CELL_H,
+                                               Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        except Exception:
+            pass
 
-    def _fallback(self):
-        if self._got_frame:
+    def _next_seq(self):
+        if not self._frames:
             return
-        try:
-            self._player.stop()
-        except Exception:
-            pass
-        self._view.setText("埋め込み再生不可\n下のボタンで再生")
-        if self._path and self.layout():
-            btn = QPushButton("▶  外部で開く")
-            btn.setObjectName("refreshBtn")
-            btn.clicked.connect(lambda: open_file_external(self._path))
-            self.layout().addWidget(btn)
+        self._idx = (self._idx + 1) % len(self._frames)
+        self._show_seq(self._idx)
 
-    def _on_frame_ps6(self, frame):
-        try:
-            self._paint(frame.toImage())
-        except Exception:
-            pass
-
-    def _loop(self, status):
-        try:
-            if status == QMediaPlayer.EndOfMedia:
-                self._player.setPosition(0)
-                self._player.play()
-        except Exception:
-            pass
-
-    # cv2 でのデコード（グリッドは負荷軽減のため低めの fps）
+    # cv2 動画（グリッドは負荷軽減のため約10fps）
     def _start_cv2(self, path):
         try:
             import cv2
@@ -1033,16 +1035,11 @@ class GridVideoCell(QWidget):
             self._cap = cap
             self._cv_timer = QTimer(self)
             self._cv_timer.timeout.connect(self._cv2_tick)
-            self._cv_timer.start(100)   # 約10fps
+            self._cv_timer.start(100)
             self._cv2_tick()
             return True
         except Exception:
-            if self._cap is not None:
-                try:
-                    self._cap.release()
-                except Exception:
-                    pass
-                self._cap = None
+            self._cap = None
             return False
 
     def _cv2_tick(self):
@@ -1065,17 +1062,14 @@ class GridVideoCell(QWidget):
     def stop(self):
         if self._cv_timer:
             self._cv_timer.stop()
+        if self._seq_timer:
+            self._seq_timer.stop()
         if self._cap is not None:
             try:
                 self._cap.release()
             except Exception:
                 pass
             self._cap = None
-        if self._player:
-            try:
-                self._player.stop()
-            except Exception:
-                pass
 
 
 class AllShotsDialog(QDialog):
@@ -1114,10 +1108,10 @@ class AllShotsDialog(QDialog):
         r = c = 0
         with_video = 0
         for name, full in shots:
-            vid = find_latest_video_under(full)
-            if vid:
+            media = pick_folder_media(full)
+            if media:
                 with_video += 1
-            cell = GridVideoCell(name, vid, parent=content)
+            cell = GridVideoCell(name, media, parent=content)
             grid.addWidget(cell, r, c)
             self._cells.append(cell)
             c += 1
@@ -1216,23 +1210,34 @@ class DetailPanel(QWidget):
             self._show_media(self._abs_path)
 
     def show_folder_video(self, folder):
-        """選択フォルダ（ショット／工程）配下の最新動画をサイドバーで再生する。"""
+        """選択フォルダ（ショット／工程）配下の最新メディアをサイドバーで再生する。
+
+        cv2 があれば動画(mp4)を、無ければ Pipeline_Movie の連番を再生する。
+        """
         self._abs_path = ""
         self._shot_folder = folder
         self._clear_layout()
         name = Path(folder).name
-        vid = find_latest_video_under(folder)
+        media = pick_folder_media(folder)
+        sub_text = "このフォルダに動画／連番はありません"
         if hasattr(self, "video"):
-            if vid:
-                self.video.set_video(vid)
-            else:
+            if media is None:
                 self.video.clear_player()
+            elif media[0] == "video":
+                self.video.set_video(media[1])
+                sub_text = f"最新動画: {Path(media[1]).name}"
+            elif media[0] == "seq":
+                self.video.set_sequence(media[1])
+                sub_text = f"最新の連番（{len(media[1])} 枚）"
+            else:  # "ext"
+                self.video.set_external(media[1])
+                sub_text = f"動画: {Path(media[1]).name}（外部再生）"
 
         title = QLabel(f"📁  {name}")
         title.setObjectName("detailFilename")
         title.setWordWrap(True)
         self.contentLayout.addWidget(title)
-        sub = QLabel(f"最新動画: {Path(vid).name}" if vid else "このフォルダに動画はありません")
+        sub = QLabel(sub_text)
         sub.setObjectName("detailValue")
         sub.setWordWrap(True)
         self.contentLayout.addWidget(sub)
