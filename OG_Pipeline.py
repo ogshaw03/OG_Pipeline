@@ -56,18 +56,47 @@ VIDEO_SUBDIR = "Pipeline_Movie"                      # プレイブラスト出�
 VIDEO_EXTS = [".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v"]
 
 # QtMultimedia（動画再生）。Maya 同梱 PySide には無いことがあるため任意依存とする。
+# 描画は QVideoWidget ではなく QLabel に行う（Maya 内で QVideoWidget が黒画面になる
+# 問題を回避し、連番画像と同じ内蔵プレイヤーで mp4 も再生するため）。
 _QT_MM = None
 try:
-    from PySide2.QtMultimedia import QMediaPlayer, QMediaContent
-    from PySide2.QtMultimediaWidgets import QVideoWidget
+    from PySide2.QtMultimedia import (QMediaPlayer, QMediaContent,
+                                      QAbstractVideoSurface, QVideoFrame, QAbstractVideoBuffer)
+    from PySide2.QtGui import QImage
     _QT_MM = 2
 except Exception:
     try:
-        from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-        from PySide6.QtMultimediaWidgets import QVideoWidget
+        from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
+        from PySide6.QtGui import QImage
         _QT_MM = 6
     except Exception:
         _QT_MM = None
+
+
+# PySide2: 動画フレームを受け取って QLabel に渡すサーフェス（別スレッド対策で Signal 経由）
+_FrameSurface = None
+if _QT_MM == 2:
+    class _FrameSurface(QAbstractVideoSurface):
+        newImage = Signal(object)
+
+        def supportedPixelFormats(self, handleType=QAbstractVideoBuffer.NoHandle):
+            # RGB 系のみ申告 → バックエンドが RGB32 等へ変換して present してくれる
+            return [QVideoFrame.Format_RGB32, QVideoFrame.Format_ARGB32,
+                    QVideoFrame.Format_ARGB32_Premultiplied,
+                    QVideoFrame.Format_RGB24, QVideoFrame.Format_BGR32]
+
+        def present(self, frame):
+            try:
+                f = QVideoFrame(frame)
+                if f.map(QAbstractVideoBuffer.ReadOnly):
+                    fmt = QVideoFrame.imageFormatFromPixelFormat(f.pixelFormat())
+                    if fmt != QImage.Format_Invalid:
+                        img = QImage(f.bits(), f.width(), f.height(), f.bytesPerLine(), fmt)
+                        self.newImage.emit(img.copy())
+                    f.unmap()
+            except Exception:
+                pass
+            return True
 
 
 SEQ_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".exr")
@@ -538,27 +567,33 @@ class VideoPlayer(QWidget):
         self._counter.hide()
         lay.addWidget(self._counter)
 
-        # 単一動画ファイル用（QtMultimedia がある場合）
-        self._video = None
+        # 動画ファイル（mp4 等）用。QVideoWidget は使わず、フレームを上の QLabel に描く。
         self._player = None
         self._audio = None
+        self._sink = None
+        self._surface = None
         if _QT_MM:
-            self._video = QVideoWidget()
-            self._video.setMinimumHeight(150)
-            self._video.setStyleSheet("background: #000;")
-            lay.addWidget(self._video)
             self._player = QMediaPlayer()
-            self._player.setVideoOutput(self._video)
             if _QT_MM == 6:
-                self._audio = QAudioOutput()
+                self._sink = QVideoSink(self)
+                self._player.setVideoSink(self._sink)
+                self._sink.videoFrameChanged.connect(self._on_frame_ps6)
+                self._audio = QAudioOutput(self)
+                self._audio.setMuted(True)
                 self._player.setAudioOutput(self._audio)
                 try:
                     self._player.setLoops(QMediaPlayer.Infinite)
                 except Exception:
                     pass
             else:
+                self._surface = _FrameSurface(self)
+                self._surface.newImage.connect(self._paint_image)
+                self._player.setVideoOutput(self._surface)
+                try:
+                    self._player.setMuted(True)
+                except Exception:
+                    pass
                 self._player.mediaStatusChanged.connect(self._loop_ps2)
-            self._video.hide()
 
         self._openBtn = QPushButton("▶  外部プレイヤーで開く")
         self._openBtn.setObjectName("refreshBtn")
@@ -580,12 +615,27 @@ class VideoPlayer(QWidget):
         self._frames = []
         self._path = None
         self._frameLabel.hide()
+        self._frameLabel.clear()
         self._counter.hide()
-        if self._video:
-            self._video.hide()
         self._openBtn.hide()
         self._placeholder.setText("動画なし（プレイブラスト未作成）")
         self._placeholder.show()
+
+    def _paint_image(self, img):
+        """QImage を frameLabel に表示（mp4 フレーム・連番共通の描画先）。"""
+        try:
+            if img is None or img.isNull():
+                return
+            w = self._frameLabel.width()
+            h = self._frameLabel.height()
+            if w < 10 or h < 10:
+                w = max(self.width() - 8, 240)
+                h = 150
+            self._frameLabel.setPixmap(
+                QPixmap.fromImage(img).scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+        except Exception:
+            pass
 
     # ── 連番画像（フリップブック） ─────────────────────────
     def set_sequence(self, frames, fps=24):
@@ -593,8 +643,6 @@ class VideoPlayer(QWidget):
         self._path = None
         self._frames = list(frames or [])
         self._idx = 0
-        if self._video:
-            self._video.hide()
         self._openBtn.hide()
         if not self._frames:
             self.clear_player()
@@ -630,7 +678,7 @@ class VideoPlayer(QWidget):
         self._idx = (self._idx + 1) % len(self._frames)
         self._show_frame(self._idx)
 
-    # ── 単一動画ファイル ───────────────────────────────────
+    # ── 動画ファイル（mp4 等：QLabel に描画） ───────────────
     def _loop_ps2(self, status):
         try:
             if status == QMediaPlayer.EndOfMedia and self._path:
@@ -639,10 +687,16 @@ class VideoPlayer(QWidget):
         except Exception:
             pass
 
+    def _on_frame_ps6(self, frame):
+        try:
+            img = frame.toImage()
+            self._paint_image(img)
+        except Exception:
+            pass
+
     def set_video(self, path):
         self._stop_all()
         self._frames = []
-        self._frameLabel.hide()
         self._counter.hide()
         self._path = path
         if not path:
@@ -650,7 +704,8 @@ class VideoPlayer(QWidget):
             return
         if _QT_MM and self._player:
             self._placeholder.hide()
-            self._video.show()
+            self._frameLabel.show()       # 連番と同じ QLabel に動画フレームを描く
+            self._frameLabel.clear()
             self._openBtn.show()
             url = QUrl.fromLocalFile(path)
             try:
@@ -662,8 +717,7 @@ class VideoPlayer(QWidget):
             except Exception as e:
                 print("[OG_Pipeline] 動画再生エラー:", e)
         else:
-            if self._video:
-                self._video.hide()
+            self._frameLabel.hide()
             self._placeholder.setText("動画あり（内蔵プレイヤー非対応）\n下のボタンで再生")
             self._placeholder.show()
             self._openBtn.show()
@@ -686,6 +740,8 @@ class GridVideoCell(QWidget):
         self.setFixedWidth(self.CELL_W)
         self._player = None
         self._audio = None
+        self._sink = None
+        self._surface = None
         self._path = video_path
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
@@ -696,15 +752,19 @@ class GridVideoCell(QWidget):
         lay.addWidget(name)
 
         vh = self.CELL_H
+        self._view = QLabel()
+        self._view.setAlignment(Qt.AlignCenter)
+        self._view.setFixedHeight(vh)
+        self._view.setStyleSheet("background: #000; color: #3a4055; border: 1px solid #1e2435;")
+        lay.addWidget(self._view)
+
         if video_path and _QT_MM:
-            self._vw = QVideoWidget()
-            self._vw.setFixedHeight(vh)
-            self._vw.setStyleSheet("background: #000;")
-            lay.addWidget(self._vw)
             self._player = QMediaPlayer(self)
-            self._player.setVideoOutput(self._vw)
             url = QUrl.fromLocalFile(video_path)
             if _QT_MM == 6:
+                self._sink = QVideoSink(self)
+                self._player.setVideoSink(self._sink)
+                self._sink.videoFrameChanged.connect(self._on_frame_ps6)
                 self._audio = QAudioOutput(self)
                 self._audio.setMuted(True)
                 self._player.setAudioOutput(self._audio)
@@ -714,6 +774,9 @@ class GridVideoCell(QWidget):
                     pass
                 self._player.setSource(url)
             else:
+                self._surface = _FrameSurface(self)
+                self._surface.newImage.connect(self._paint)
+                self._player.setVideoOutput(self._surface)
                 try:
                     self._player.setMuted(True)
                 except Exception:
@@ -723,11 +786,7 @@ class GridVideoCell(QWidget):
             self._player.play()
             sub = QLabel(Path(video_path).name)
         else:
-            ph = QLabel("動画なし" if not video_path else "再生不可\n外部で開く")
-            ph.setAlignment(Qt.AlignCenter)
-            ph.setFixedHeight(vh)
-            ph.setStyleSheet("background: #05070c; color: #3a4055; border: 1px solid #1e2435;")
-            lay.addWidget(ph)
+            self._view.setText("動画なし" if not video_path else "再生不可\n外部で開く")
             if video_path:
                 btn = QPushButton("▶  外部で開く")
                 btn.setObjectName("refreshBtn")
@@ -737,6 +796,20 @@ class GridVideoCell(QWidget):
         sub.setStyleSheet("color: #4a5568; font-size: 9px;")
         sub.setWordWrap(True)
         lay.addWidget(sub)
+
+    def _paint(self, img):
+        try:
+            if img and not img.isNull():
+                self._view.setPixmap(QPixmap.fromImage(img).scaled(
+                    self.CELL_W - 8, self.CELL_H, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        except Exception:
+            pass
+
+    def _on_frame_ps6(self, frame):
+        try:
+            self._paint(frame.toImage())
+        except Exception:
+            pass
 
     def _loop(self, status):
         try:
