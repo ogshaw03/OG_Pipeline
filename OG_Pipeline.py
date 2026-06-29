@@ -190,10 +190,12 @@ def pick_folder_media(folder):
       - どれも無し                        → None
     cv2 が無い場合は「連番」を優先フォールバックにする。
     """
+    # cv2 が使えるなら動画を先に探し、見つかれば連番探索（os.walk）は省略する。
+    # ネットワーク/OneDrive 上ではフォルダ走査が遅いため、無駄な走査を減らす。
     video = find_latest_video_under(folder)
-    seq = find_latest_sequence_under(folder)
     if _HAS_CV2 and video:
         return ("video", video)
+    seq = find_latest_sequence_under(folder)
     if seq:
         return ("seq", seq)
     if video:
@@ -341,8 +343,8 @@ class Cv2VideoThread(QThread):
                 pass
 
     def stop(self):
+        # GUI スレッドをブロックしないよう wait しない。run() は次のループで抜ける。
         self._running = False
-        self.wait(1500)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -799,7 +801,7 @@ class VideoPlayer(QWidget):
                 w = max(self.width() - 8, 240)
                 h = 150
             self._frameLabel.setPixmap(
-                QPixmap.fromImage(img).scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                QPixmap.fromImage(img).scaled(w, h, Qt.KeepAspectRatio, Qt.FastTransformation)
             )
         except Exception:
             pass
@@ -856,7 +858,7 @@ class VideoPlayer(QWidget):
                     w = max(self.width() - 8, 240)
                     h = 150
                 self._frameLabel.setPixmap(
-                    pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    pm.scaled(w, h, Qt.KeepAspectRatio, Qt.FastTransformation)
                 )
             self._counter.setText(f"連番再生  {i + 1}/{len(self._frames)}")
         except Exception:
@@ -960,20 +962,17 @@ class GridVideoCell(QWidget):
         self._view.setStyleSheet("background: #000; color: #3a4055; border: 1px solid #1e2435;")
         lay.addWidget(self._view)
 
+        self._media = media
+        self._playing = False
         kind = media[0] if media else None
-        if kind == "video":            # cv2 で再生
-            if not self._start_cv2(media[1]):
-                self._view.setText("再生不可")
+        if kind == "video":
+            self._view.setText("…")
             sub = Path(media[1]).name
-        elif kind == "seq":            # 連番フリップブック
+        elif kind == "seq":
             self._frames = media[1]
-            self._seq_timer = QTimer(self)
-            self._seq_timer.timeout.connect(self._next_seq)
-            self._show_seq(0)
-            if len(self._frames) > 1:
-                self._seq_timer.start(100)   # 約10fps
+            self._show_seq(0)            # 先頭フレームだけ静止表示
             sub = "連番 %d 枚" % len(self._frames)
-        elif kind == "ext":            # 外部のみ
+        elif kind == "ext":
             self._view.setText("外部で再生")
             btn = QPushButton("▶  外部で開く")
             btn.setObjectName("refreshBtn")
@@ -988,11 +987,31 @@ class GridVideoCell(QWidget):
         s.setWordWrap(True)
         lay.addWidget(s)
 
+    # ── 再生制御（表示中のセルだけ再生して負荷を抑える） ─────
+    def play(self):
+        if self._playing or not self._media:
+            return
+        kind = self._media[0]
+        if kind == "video":
+            self._playing = self._start_cv2(self._media[1])
+        elif kind == "seq" and len(self._frames) > 1:
+            if self._seq_timer is None:
+                self._seq_timer = QTimer(self)
+                self._seq_timer.timeout.connect(self._next_seq)
+            self._seq_timer.start(100)   # 約10fps
+            self._playing = True
+
+    def pause(self):
+        self._playing = False
+        if self._seq_timer:
+            self._seq_timer.stop()
+        self._stop_thread()
+
     def _paint(self, img):
         try:
             if img and not img.isNull():
                 self._view.setPixmap(QPixmap.fromImage(img).scaled(
-                    self.CELL_W - 8, self.CELL_H, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    self.CELL_W - 8, self.CELL_H, Qt.KeepAspectRatio, Qt.FastTransformation))
         except Exception:
             pass
 
@@ -1002,7 +1021,7 @@ class GridVideoCell(QWidget):
             pm = QPixmap(self._frames[i])
             if not pm.isNull():
                 self._view.setPixmap(pm.scaled(self.CELL_W - 8, self.CELL_H,
-                                               Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                                               Qt.KeepAspectRatio, Qt.FastTransformation))
         except Exception:
             pass
 
@@ -1012,20 +1031,19 @@ class GridVideoCell(QWidget):
         self._idx = (self._idx + 1) % len(self._frames)
         self._show_seq(self._idx)
 
-    # cv2 動画（別スレッドでデコード。グリッドは縮小＋低fpsで軽量化）
+    # cv2 動画（別スレッドでデコード）
     def _start_cv2(self, path):
         try:
-            self._cv_thread = Cv2VideoThread(path, max_w=self.CELL_W, fps=12, parent=self)
+            self._cv_thread = Cv2VideoThread(path, max_w=self.CELL_W, parent=self)
             self._cv_thread.frameReady.connect(self._paint)
+            self._cv_thread.finished.connect(self._cv_thread.deleteLater)
             self._cv_thread.start()
             return True
         except Exception:
             self._cv_thread = None
             return False
 
-    def stop(self):
-        if self._seq_timer:
-            self._seq_timer.stop()
+    def _stop_thread(self):
         if self._cv_thread is not None:
             try:
                 self._cv_thread.frameReady.disconnect()
@@ -1036,6 +1054,9 @@ class GridVideoCell(QWidget):
             except Exception:
                 pass
             self._cv_thread = None
+
+    def stop(self):
+        self.pause()
 
 
 class AllShotsDialog(QDialog):
@@ -1086,18 +1107,65 @@ class AllShotsDialog(QDialog):
                 r += 1
         grid.setRowStretch(r + 1, 1)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(content)
-        outer.addWidget(scroll, 1)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setWidget(content)
+        self._scroll.verticalScrollBar().valueChanged.connect(self._update_visible)
+        outer.addWidget(self._scroll, 1)
 
-        foot = QLabel(f"動画あり {with_video} / {len(shots)} ショット　（多数同時再生は重くなる場合があります）")
+        foot = QLabel(f"動画あり {with_video} / {len(shots)} ショット　"
+                      "（表示中のセルのみ再生して負荷を抑えています）")
         foot.setStyleSheet("color: #3a4055; font-size: 10px; padding: 4px 10px;")
         outer.addWidget(foot)
 
-    def closeEvent(self, event):
+    def _update_visible(self, *args):
+        """ビューポート内に見えているセルだけ再生し、他は一時停止する。"""
+        if not self.isActiveWindow() and not self.isVisible():
+            return
+        for cell in self._cells:
+            try:
+                visible = (self.isVisible() and not cell.visibleRegion().isEmpty())
+            except Exception:
+                visible = True
+            if visible:
+                cell.play()
+            else:
+                cell.pause()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._update_visible)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_visible()
+
+    def changeEvent(self, event):
+        # ウィンドウが非アクティブ/最小化されたら全停止（裏で回り続けない）
+        try:
+            from_active = event.type() == event.WindowStateChange or \
+                event.type() == event.ActivationChange
+        except Exception:
+            from_active = False
+        super().changeEvent(event)
+        if from_active:
+            if self.isActiveWindow() and not self.isMinimized():
+                self._update_visible()
+            else:
+                for cell in self._cells:
+                    cell.pause()
+
+    def hideEvent(self, event):
+        for cell in self._cells:
+            cell.pause()
+        super().hideEvent(event)
+
+    def stop_all(self):
         for cell in self._cells:
             cell.stop()
+
+    def closeEvent(self, event):
+        self.stop_all()
         super().closeEvent(event)
 
 
@@ -1968,6 +2036,15 @@ class OGPipelineWindow(QWidget):
         if not self.active_shots_parent or not os.path.isdir(str(self.active_shots_parent)):
             self.statusLabel.setText("ショットフォルダの親が未設定です（[＋ 追加] で指定）")
             return
+        # 既存ウィンドウは閉じる（裏でデコードスレッドが溜まるのを防ぐ）
+        old = getattr(self, "_all_shots_dlg", None)
+        if old is not None:
+            try:
+                old.stop_all()
+                old.close()
+                old.deleteLater()
+            except Exception:
+                pass
         self._all_shots_dlg = AllShotsDialog(self.active_shots_parent, self)
         self._all_shots_dlg.show()
         self._all_shots_dlg.raise_()
