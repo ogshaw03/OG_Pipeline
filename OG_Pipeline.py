@@ -52,8 +52,8 @@ except ImportError:
 # ─── 定数 ────────────────────────────────────────────────────────────────────
 MAYA_EXTENSIONS = {".ma", ".mb"}
 WINDOW_OBJECT_NAME = "OGPipelineSceneOpenerWindow"   # 多重起動検出用の安定識別名
-VIDEO_SUBDIR = "movies"                              # シーンフォルダ内の動画保存フォルダ
-VIDEO_EXTS = [".mov", ".mp4", ".avi", ".mkv", ".wmv", ".m4v"]
+VIDEO_SUBDIR = "Pipeline_Movie"                      # プレイブラスト出力フォルダ名
+VIDEO_EXTS = [".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v"]
 
 # QtMultimedia（動画再生）。Maya 同梱 PySide には無いことがあるため任意依存とする。
 _QT_MM = None
@@ -102,43 +102,26 @@ def find_scene_sequence(scene_path):
     return None
 
 
-def find_latest_shot_media(shot_folder):
-    """ショットフォルダ配下の「最新」プレイブラストを返す。
+def find_latest_video_under(folder):
+    """フォルダ配下を再帰探索し、更新日時が最新の動画ファイルのパスを返す。
 
-    movies フォルダ配下を再帰探索し、更新日時が最も新しいものを採用する。
-    戻り値: ("seq", [frames]) / ("movie", path) / None。
+    シーンフォルダ直下／movie フォルダ／Pipeline_Movie など場所を問わず、
+    動画ファイル(VIDEO_EXTS)の中で mtime 最新のものを採用する。無ければ None。
     """
-    if not shot_folder or not os.path.isdir(shot_folder):
+    if not folder or not os.path.isdir(folder):
         return None
-    best = None  # (mtime, kind, value)
-    for cur, dirs, files in os.walk(shot_folder):
-        parent = os.path.basename(os.path.dirname(cur))
-        base = os.path.basename(cur)
-        # movies/<stem>/ … 連番画像ディレクトリ
-        if parent == VIDEO_SUBDIR:
-            frames = sorted(os.path.join(cur, f) for f in files
-                            if os.path.splitext(f)[1].lower() in SEQ_EXTS)
-            if frames:
+    best = None  # (mtime, path)
+    for cur, dirs, files in os.walk(folder):
+        for f in files:
+            if os.path.splitext(f)[1].lower() in VIDEO_EXTS:
+                full = os.path.join(cur, f)
                 try:
-                    m = max(os.path.getmtime(fr) for fr in frames)
+                    m = os.path.getmtime(full)
                 except Exception:
                     m = 0.0
                 if best is None or m > best[0]:
-                    best = (m, "seq", frames)
-        # movies/ 直下 … 単一動画ファイル
-        if base == VIDEO_SUBDIR:
-            for f in files:
-                if os.path.splitext(f)[1].lower() in VIDEO_EXTS:
-                    full = os.path.join(cur, f)
-                    try:
-                        m = os.path.getmtime(full)
-                    except Exception:
-                        m = 0.0
-                    if best is None or m > best[0]:
-                        best = (m, "movie", full)
-    if best is None:
-        return None
-    return best[1], best[2]
+                    best = (m, full)
+    return best[1] if best else None
 
 
 def open_file_external(path):
@@ -687,6 +670,147 @@ class VideoPlayer(QWidget):
         self._stop_all()
 
 
+# ─── 全ショット動画一覧（グリッド・自動再生） ───────────────────────────────────
+class GridVideoCell(QWidget):
+    """グリッド内の1セル: ショット名＋最新動画をループ自動再生（ミュート）。"""
+    CELL_W, CELL_H = 300, 175
+
+    def __init__(self, shot_name, video_path, on_select=None, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(self.CELL_W)
+        self._player = None
+        self._audio = None
+        self._path = video_path
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(2)
+
+        name = QLabel(shot_name)
+        name.setStyleSheet("color: #e8c87a; font-size: 11px; font-weight: bold;")
+        lay.addWidget(name)
+
+        vh = self.CELL_H
+        if video_path and _QT_MM:
+            self._vw = QVideoWidget()
+            self._vw.setFixedHeight(vh)
+            self._vw.setStyleSheet("background: #000;")
+            lay.addWidget(self._vw)
+            self._player = QMediaPlayer(self)
+            self._player.setVideoOutput(self._vw)
+            url = QUrl.fromLocalFile(video_path)
+            if _QT_MM == 6:
+                self._audio = QAudioOutput(self)
+                self._audio.setMuted(True)
+                self._player.setAudioOutput(self._audio)
+                try:
+                    self._player.setLoops(QMediaPlayer.Infinite)
+                except Exception:
+                    pass
+                self._player.setSource(url)
+            else:
+                try:
+                    self._player.setMuted(True)
+                except Exception:
+                    pass
+                self._player.mediaStatusChanged.connect(self._loop)
+                self._player.setMedia(QMediaContent(url))
+            self._player.play()
+            sub = QLabel(Path(video_path).name)
+        else:
+            ph = QLabel("動画なし" if not video_path else "再生不可\n外部で開く")
+            ph.setAlignment(Qt.AlignCenter)
+            ph.setFixedHeight(vh)
+            ph.setStyleSheet("background: #05070c; color: #3a4055; border: 1px solid #1e2435;")
+            lay.addWidget(ph)
+            if video_path:
+                btn = QPushButton("▶  外部で開く")
+                btn.setObjectName("refreshBtn")
+                btn.clicked.connect(lambda: open_file_external(video_path))
+                lay.addWidget(btn)
+            sub = QLabel(Path(video_path).name if video_path else "—")
+        sub.setStyleSheet("color: #4a5568; font-size: 9px;")
+        sub.setWordWrap(True)
+        lay.addWidget(sub)
+
+    def _loop(self, status):
+        try:
+            if status == QMediaPlayer.EndOfMedia:
+                self._player.setPosition(0)
+                self._player.play()
+        except Exception:
+            pass
+
+    def stop(self):
+        if self._player:
+            try:
+                self._player.stop()
+            except Exception:
+                pass
+
+
+class AllShotsDialog(QDialog):
+    """全ショットの最新動画をグリッドで一覧・自動再生する（OGREF 風）。"""
+    COLS = 4
+
+    def __init__(self, shots_parent, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.Window)
+        self.setWindowTitle("All Shots — 最新動画一覧")
+        self.setMinimumSize(1000, 680)
+        self.setStyleSheet(STYLE)
+        self._cells = []
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        shots = []
+        try:
+            for d in sorted(os.listdir(shots_parent)):
+                full = os.path.join(shots_parent, d)
+                if os.path.isdir(full):
+                    shots.append((d, full))
+        except Exception:
+            pass
+
+        head = QLabel(f"◈  ALL SHOTS   —   {len(shots)} shots   |   {shots_parent}")
+        head.setObjectName("detailTitle")
+        outer.addWidget(head)
+
+        content = QWidget()
+        grid = QGridLayout(content)
+        grid.setContentsMargins(10, 10, 10, 10)
+        grid.setSpacing(10)
+        r = c = 0
+        with_video = 0
+        for name, full in shots:
+            vid = find_latest_video_under(full)
+            if vid:
+                with_video += 1
+            cell = GridVideoCell(name, vid, parent=content)
+            grid.addWidget(cell, r, c)
+            self._cells.append(cell)
+            c += 1
+            if c >= self.COLS:
+                c = 0
+                r += 1
+        grid.setRowStretch(r + 1, 1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
+
+        foot = QLabel(f"動画あり {with_video} / {len(shots)} ショット　（多数同時再生は重くなる場合があります）")
+        foot.setStyleSheet("color: #3a4055; font-size: 10px; padding: 4px 10px;")
+        outer.addWidget(foot)
+
+    def closeEvent(self, event):
+        for cell in self._cells:
+            cell.stop()
+        super().closeEvent(event)
+
+
 # ─── 詳細パネル ──────────────────────────────────────────────────────────────
 class DetailPanel(QWidget):
     def __init__(self, parent=None):
@@ -757,35 +881,28 @@ class DetailPanel(QWidget):
     def reload_video(self):
         """現在表示中の動画／連番を再探索して反映（プレイブラスト直後など）。"""
         if self._shot_folder:
-            self.show_shot_media(self._shot_folder)
+            self.show_folder_video(self._shot_folder)
         elif self._abs_path:
             self._show_media(self._abs_path)
 
-    def show_shot_media(self, folder):
-        """ショットフォルダ配下の最新プレイブラストをサイドバーに表示する。"""
+    def show_folder_video(self, folder):
+        """選択フォルダ（ショット／工程）配下の最新動画をサイドバーで再生する。"""
         self._abs_path = ""
         self._shot_folder = folder
         self._clear_layout()
         name = Path(folder).name
-        media = find_latest_shot_media(folder)
+        vid = find_latest_video_under(folder)
         if hasattr(self, "video"):
-            if media is None:
-                self.video.clear_player()
-            elif media[0] == "seq":
-                self.video.set_sequence(media[1])
+            if vid:
+                self.video.set_video(vid)
             else:
-                self.video.set_video(media[1])
+                self.video.clear_player()
 
         title = QLabel(f"📁  {name}")
         title.setObjectName("detailFilename")
         title.setWordWrap(True)
         self.contentLayout.addWidget(title)
-        if media is None:
-            sub = QLabel("このショットに動画はありません\n（シーンを選んで PLAYBLAST）")
-        elif media[0] == "seq":
-            sub = QLabel(f"最新プレイブラスト（連番 {len(media[1])} 枚）")
-        else:
-            sub = QLabel(f"最新プレイブラスト: {Path(media[1]).name}")
+        sub = QLabel(f"最新動画: {Path(vid).name}" if vid else "このフォルダに動画はありません")
         sub.setObjectName("detailValue")
         sub.setWordWrap(True)
         self.contentLayout.addWidget(sub)
@@ -1524,8 +1641,27 @@ class OGPipelineWindow(QWidget):
         self.exportRootBtn.clicked.connect(self._export_roots)
         layout.addWidget(self.exportRootBtn)
 
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.VLine)
+        sep2.setStyleSheet("color: #1e2435;")
+        layout.addWidget(sep2)
+
+        self.allShotsBtn = QPushButton("🎞  全ショット動画")
+        self.allShotsBtn.setObjectName("refreshBtn")
+        self.allShotsBtn.setToolTip("全ショットの最新動画をグリッドで一覧・自動再生")
+        self.allShotsBtn.clicked.connect(self._open_all_shots)
+        layout.addWidget(self.allShotsBtn)
+
         layout.addStretch()
         return bar
+
+    def _open_all_shots(self):
+        if not self.active_shots_parent or not os.path.isdir(str(self.active_shots_parent)):
+            self.statusLabel.setText("ショットフォルダの親が未設定です（[＋ 追加] で指定）")
+            return
+        self._all_shots_dlg = AllShotsDialog(self.active_shots_parent, self)
+        self._all_shots_dlg.show()
+        self._all_shots_dlg.raise_()
 
     def _build_toolbar(self) -> QWidget:
         toolbar = QWidget()
@@ -1720,7 +1856,7 @@ class OGPipelineWindow(QWidget):
         self._apply_root()
         self.statusLabel.setText(f"✓  ルートを追加: {name}（ショット親: {shots_parent}）")
 
-    # ── フォルダ選択（ショットの最新動画表示） ─────────────
+    # ── フォルダ選択（配下の最新動画を表示） ───────────────
     def _is_shot_folder(self, folder):
         """folder が「ショットフォルダの親」の直下なら True（＝ショットフォルダ）。"""
         if not self.active_shots_parent:
@@ -1733,17 +1869,14 @@ class OGPipelineWindow(QWidget):
             return False
 
     def _on_folder_selected(self, folder):
+        # フォルダ（ショット／工程フォルダ等）選択 → 配下の最新動画を再生
         self._selected_path = ""
         self.openBtn.setEnabled(False)
         self.importBtn.setEnabled(False)
         self.openFolderBtn.setEnabled(False)
-        name = Path(folder).name
-        if self._is_shot_folder(folder):
-            self.selectedLabel.setText(f"ショット: {name}（最新プレイブラスト）")
-            self.detailPanel.show_shot_media(folder)
-        else:
-            self.selectedLabel.setText(f"フォルダ: {name}")
-            self.detailPanel.clear()
+        label = "ショット" if self._is_shot_folder(folder) else "フォルダ"
+        self.selectedLabel.setText(f"{label}: {Path(folder).name}（配下の最新動画）")
+        self.detailPanel.show_folder_video(folder)
 
     def _import_roots(self):
         fp, _ = QFileDialog.getOpenFileName(
