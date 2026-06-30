@@ -3355,8 +3355,11 @@ class ProjectSettingsDialog(QDialog):
         form.addRow("ショットフォルダの親:",
                     self._with_browse(self.shotsEdit, self._browse_shots))
 
-        self.stageEdit = QLineEdit(entry.get("stage_subpath", ""))
-        self.stageEdit.setPlaceholderText("ショット親からの相対パス。例: Boss_003 ／ * （空=直下）")
+        # 複数指定できるよう複数行入力（1行に1パス。カンマ区切りも可）
+        self.stageEdit = QPlainTextEdit(entry.get("stage_subpath", ""))
+        self.stageEdit.setPlaceholderText(
+            "ショット親からの相対パス。1行に1つ（複数可）。例:\nBoss_003\nchr_001_03\n（* も可・空=直下）")
+        self.stageEdit.setFixedHeight(64)
         form.addRow("サブパス（この直下がタイル）:",
                     self._with_browse(self.stageEdit, self._browse_stage, "例から取得…"))
 
@@ -3512,7 +3515,9 @@ class ProjectSettingsDialog(QDialog):
         if not d:
             return
         sub = self._derive_subpath(d, sp)
-        self.stageEdit.setText(sub)
+        # 既存内容に1行追加（複数指定できるように）
+        cur = self.stageEdit.toPlainText().strip()
+        self.stageEdit.setPlainText((cur + "\n" + sub).strip() if cur else sub)
 
     @staticmethod
     def _derive_subpath(picked, shots_parent):
@@ -3549,7 +3554,7 @@ class ProjectSettingsDialog(QDialog):
         self.nameEdit.setText(entry.get("name", ""))
         self.rootEdit.setText(entry.get("path", ""))
         self.shotsEdit.setText(entry.get("shots_parent", ""))
-        self.stageEdit.setText(entry.get("stage_subpath", ""))
+        self.stageEdit.setPlainText(entry.get("stage_subpath", ""))
         self.stageTable.setRowCount(0)
         for st in entry.get("stages", []) or []:
             self._add_stage_row(st)
@@ -3598,7 +3603,8 @@ class ProjectSettingsDialog(QDialog):
             "name": self.nameEdit.text().strip(),
             "path": self.rootEdit.text().strip(),
             "shots_parent": self.shotsEdit.text().strip() or self.rootEdit.text().strip(),
-            "stage_subpath": self.stageEdit.text().strip().strip("/\\"),
+            # 複数行＝複数サブパス。全体の前後空白だけ除去（各行は展開側で処理）。
+            "stage_subpath": self.stageEdit.toPlainText().strip(),
             "stages": self._stages_from_table(),
         }
 
