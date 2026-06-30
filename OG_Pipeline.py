@@ -4488,7 +4488,7 @@ class OGPipelineWindow(QWidget):
             last = self._existing_output_mtime(cur)   # セッションをまたいでも判定できる
         if interval > 0 and last is not None and (now - last) < interval:
             remain = int((interval - (now - last)) / 60) + 1
-            self.statusLabel.setText(
+            self._set_export_status(
                 "自動書き出しをスキップ（前回更新から%d分未満／あと約%d分）"
                 % (get_auto_export_interval_min(), remain))
             return
@@ -4496,11 +4496,11 @@ class OGPipelineWindow(QWidget):
         method = get_export_method()   # 自動更新は環境設定の方式に従う
         if method == "hardware":
             ok, msg, proc = export_hardware_background(cur)
-            self.statusLabel.setText(("▸ 自動: " if ok else "▲ 自動: ") + msg)
+            self._set_export_status(("▸ 自動: " if ok else "▲ 自動: ") + msg)
             if ok and proc is not None:
                 self._watch_hw_export(cur, proc, label="自動")
         else:
-            self.statusLabel.setText("▸ 自動プレイブラスト中…")
+            self._set_export_status("▸ 自動プレイブラスト中…")
             self._playblast(cur)
 
     def _shot_number_of(self, scene_path):
@@ -4689,6 +4689,13 @@ class OGPipelineWindow(QWidget):
         dlg = SettingsDialog(self)
         if dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec():
             dlg.save()
+            # 環境設定で自動更新 ON/OFF が変わったら、保存バー側のチェックも合わせる
+            try:
+                self.autoExportCheck.blockSignals(True)
+                self.autoExportCheck.setChecked(get_auto_export_on_save())
+                self.autoExportCheck.blockSignals(False)
+            except Exception:
+                pass
             # 環境設定は自動更新用。手動の方式プルダウンとは独立なので同期しない。
             self.statusLabel.setText(
                 "環境設定を保存しました（自動更新の方式: %s ／ 自動更新: %s ／ 最小間隔: %d分）"
@@ -4941,7 +4948,38 @@ class OGPipelineWindow(QWidget):
         ab_layout.addWidget(self.openBtn)
 
         layout.addWidget(action_bar)
+
+        # 保存時の動画書き出しトグル＋書き出し専用ステータス（セーブ系ボタンの直下）。
+        # 書き出し状態は他の操作で消えないよう、通常ステータスと分けて常時表示する。
+        sm_bar = QWidget()
+        sm_bar.setStyleSheet("background: #0a0d14; border-top: 1px solid #1e2435;")
+        sm_bar.setFixedHeight(28)
+        sm = QHBoxLayout(sm_bar)
+        sm.setContentsMargins(16, 2, 16, 2)
+        sm.setSpacing(10)
+        self.autoExportCheck = QCheckBox("保存時に動画書き出し")
+        self.autoExportCheck.setChecked(get_auto_export_on_save())
+        self.autoExportCheck.setToolTip(
+            "Scene 保存時に自動で動画を書き出す（方式・最小間隔は環境設定に従う）")
+        self.autoExportCheck.toggled.connect(
+            lambda v: set_auto_export_on_save(bool(v)))
+        sm.addWidget(self.autoExportCheck)
+        sm.addSpacing(12)
+        sm.addWidget(QLabel("書き出し:"))
+        self.exportStatusLabel = QLabel("—")
+        self.exportStatusLabel.setStyleSheet("color: #e8a838; font-size: 11px;")
+        self.exportStatusLabel.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sm.addWidget(self.exportStatusLabel, 1)
+        layout.addWidget(sm_bar)
         return panel
+
+    def _set_export_status(self, text):
+        """動画書き出し専用ステータスを更新する（通常ステータスとは別枠・即時再描画）。"""
+        try:
+            self.exportStatusLabel.setText(text)
+            self.exportStatusLabel.repaint()
+        except Exception:
+            pass
 
     def _build_movie_bar(self) -> QWidget:
         """動画書き出しグループ（サイドバー下部に配置）。
@@ -5835,7 +5873,7 @@ class OGPipelineWindow(QWidget):
             )
             return
         if not cur:
-            self.statusLabel.setText("現在のシーンが未保存です（書き出し先がありません）")
+            self._set_export_status("現在のシーンが未保存です（書き出し先がありません）")
             return
 
         # 手動書き出しも自動更新のスロットル基準時刻に反映する
@@ -5843,7 +5881,7 @@ class OGPipelineWindow(QWidget):
         method = self.exportMethodCombo.currentData() or "playblast"
         if method == "hardware":
             ok, msg, proc = export_hardware_background(cur)
-            self.statusLabel.setText(("▸  " if ok else "▲  ") + msg)
+            self._set_export_status(("▸  " if ok else "▲  ") + msg)
             if not ok:
                 QMessageBox.warning(self, "ハードウェア書き出し", msg)
             elif proc is not None:
@@ -5877,7 +5915,7 @@ class OGPipelineWindow(QWidget):
             n = len(frames) if frames else 0
             tag = (label + " ") if label else ""
             if n > 0:
-                self.statusLabel.setText(
+                self._set_export_status(
                     "✓  %s動画書き出し完了: %s（連番 %d 枚）" % (tag, stem, n))
                 self.detailPanel.reload_video()
                 self._refresh_all_shots_if_open()
@@ -5890,14 +5928,9 @@ class OGPipelineWindow(QWidget):
                             detail = lines[-1] if lines else ""
                 except Exception:
                     pass
-                self.statusLabel.setText(
+                self._set_export_status(
                     "▲  %s書き出し完了しましたがフレーム未生成（_oghw_log.txt 参照）%s"
                     % (tag, ("／" + detail) if detail else ""))
-            # タイマー起点の更新は操作待ちにならないよう即時再描画する
-            try:
-                self.statusLabel.repaint()
-            except Exception:
-                pass
 
         timer.timeout.connect(_poll)
         timer.start(700)
@@ -6001,10 +6034,10 @@ class OGPipelineWindow(QWidget):
                 self, "プレイブラスト失敗",
                 "連番画像を書き出せませんでした:\n\n" + detail,
             )
-            self.statusLabel.setText("▲  プレイブラスト失敗（詳細はダイアログ参照）")
+            self._set_export_status("▲  プレイブラスト失敗（詳細はダイアログ参照）")
             return
 
-        self.statusLabel.setText(
+        self._set_export_status(
             f"✓  動画書き出し完了: {Path(scene_path).stem}"
             f"（連番 {len(find_scene_sequence(scene_path))} 枚 → {seq_dir}）")
         self.detailPanel.reload_video()   # 選択中シーンならサイドバーで連番再生
