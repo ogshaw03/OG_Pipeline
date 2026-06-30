@@ -388,13 +388,14 @@ def export_hardware_background(scene_path):
     """別プロセス(mayabatch)でハードウェアレンダー書き出しをバックグラウンド起動する。
 
     現在の Maya セッションをブロックしない（Popen して即 return）。
-    戻り値: (ok, message)。ok=True は「起動できた」を意味し、完了は意味しない。
+    戻り値: (ok, message, proc)。ok=True は「起動できた」を意味し、完了は意味しない。
+    proc は起動したプロセス（完了監視に使う）。失敗時は None。
     """
     batch_exe, is_batch = _find_maya_batch()
     if not batch_exe:
-        return False, "mayabatch / maya 実行ファイルが見つかりませんでした。"
+        return False, "mayabatch / maya 実行ファイルが見つかりませんでした。", None
     if not scene_path or not os.path.isfile(scene_path):
-        return False, "シーンファイルが見つかりません（保存後に実行してください）。"
+        return False, "シーンファイルが見つかりません（保存後に実行してください）。", None
 
     stem = Path(scene_path).stem
     seq_dir = os.path.join(os.path.dirname(scene_path), VIDEO_SUBDIR, stem)
@@ -403,7 +404,7 @@ def export_hardware_background(scene_path):
             shutil.rmtree(seq_dir, ignore_errors=True)
         os.makedirs(seq_dir, exist_ok=True)
     except Exception as e:
-        return False, "出力フォルダを作成できませんでした: %s" % e
+        return False, "出力フォルダを作成できませんでした: %s" % e, None
 
     # ワーカースクリプトをスクラッチに書き出す
     worker_dir = get_config_dir()
@@ -412,7 +413,7 @@ def export_hardware_background(scene_path):
         with open(worker_py, "w", encoding="utf-8") as fh:
             fh.write(_hw_worker_source(scene_path, seq_dir, stem))
     except Exception as e:
-        return False, "ワーカースクリプトを書き出せませんでした: %s" % e
+        return False, "ワーカースクリプトを書き出せませんでした: %s" % e, None
 
     # MEL の -command から python ワーカーを実行する
     mel_cmd = 'python("import runpy; runpy.run_path(r\'%s\')")' % worker_py.replace("\\", "/")
@@ -434,11 +435,11 @@ def export_hardware_background(scene_path):
         pass
 
     try:
-        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         **kwargs)
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, **kwargs)
     except Exception as e:
-        return False, "バックグラウンド起動に失敗しました: %s" % e
-    return True, "バックグラウンドで書き出し中… 完了後に [↻ REFRESH] で更新してください（出力: %s）" % seq_dir
+        return False, "バックグラウンド起動に失敗しました: %s" % e, None
+    return True, "バックグラウンドで書き出し中…（裏で処理しています）", proc
 
 
 def install_opencv():
@@ -2596,6 +2597,8 @@ class OGPipelineWindow(QWidget):
         self.active_shots_parent = None
         self._last_export_at = {}    # {正規化シーンパス: 最終書き出し time.time()}
         self._save_job = None        # SceneSaved scriptJob の ID
+        self._current_folder = None  # ブラウザでリーブ中のフォルダ（新規保存先候補）
+        self._hw_watchers = []       # ハードウェア書き出しの完了監視タイマー
 
         self.setStyleSheet(STYLE)
         self._build_ui()
@@ -2679,10 +2682,12 @@ class OGPipelineWindow(QWidget):
                 % (get_auto_export_interval_min(), remain))
             return
         self._last_export_at[key] = now
-        method = get_export_method()
+        method = get_export_method()   # 自動更新は環境設定の方式に従う
         if method == "hardware":
-            ok, msg = export_hardware_background(cur)
+            ok, msg, proc = export_hardware_background(cur)
             self.statusLabel.setText(("🎬 自動: " if ok else "⚠ 自動: ") + msg)
+            if ok and proc is not None:
+                self._watch_hw_export(cur, proc, label="自動")
         else:
             self.statusLabel.setText("🎬 自動プレイブラスト中…")
             self._playblast(cur)
@@ -2845,16 +2850,25 @@ class OGPipelineWindow(QWidget):
         layout.addWidget(self.settingsBtn)
         return bar
 
+    def _on_auto_export_toggled(self, checked):
+        set_auto_export_on_save(checked)
+        self.statusLabel.setText(
+            "保存時の自動書き出しを %s にしました" % ("ON" if checked else "OFF"))
+
     def _open_settings(self):
         dlg = SettingsDialog(self)
         if dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec():
             dlg.save()
-            # ファイル操作バーの方式プルダウンを設定に同期
-            idx = self.exportMethodCombo.findData(get_export_method())
-            if idx >= 0:
-                self.exportMethodCombo.setCurrentIndex(idx)
+            # 環境設定は自動更新用。手動の方式プルダウンとは独立なので同期しない。
+            # 自動書き出しの ON/OFF だけ、ムービーバーのチェックと同期する。
+            try:
+                self.autoExportCheck.blockSignals(True)
+                self.autoExportCheck.setChecked(get_auto_export_on_save())
+                self.autoExportCheck.blockSignals(False)
+            except Exception:
+                pass
             self.statusLabel.setText(
-                "環境設定を保存しました（方式: %s ／ 自動更新: %s ／ 最小間隔: %d分）"
+                "環境設定を保存しました（自動更新の方式: %s ／ 自動更新: %s ／ 最小間隔: %d分）"
                 % (get_export_method(),
                    "ON" if get_auto_export_on_save() else "OFF",
                    get_auto_export_interval_min()))
@@ -2907,6 +2921,11 @@ class OGPipelineWindow(QWidget):
             self._sceneTimer.stop()
         except Exception:
             pass
+        for t in getattr(self, "_hw_watchers", []):
+            try:
+                t.stop()
+            except Exception:
+                pass
         self._kill_save_job()
         try:
             self.detailPanel.video.stop()
@@ -3046,25 +3065,12 @@ class OGPipelineWindow(QWidget):
         self.versionUpBtn.clicked.connect(self._version_up_save)
         ab_layout.addWidget(self.versionUpBtn)
 
-        # 書き出し方式の選択（プレイブラスト / ハードウェア＝バックグラウンド）
-        self.exportMethodCombo = QComboBox()
-        self.exportMethodCombo.addItem("プレイブラスト", "playblast")
-        self.exportMethodCombo.addItem("ハードウェア(裏)", "hardware")
-        self.exportMethodCombo.setToolTip(
-            "プレイブラスト: 現在のビューを撮る（一瞬画面が止まる）\n"
-            "ハードウェア(裏): 別プロセスでレンダー（手元を止めない／画面に出ない）")
-        idx = self.exportMethodCombo.findData(get_export_method())
-        if idx >= 0:
-            self.exportMethodCombo.setCurrentIndex(idx)
-        self.exportMethodCombo.activated.connect(self._on_export_method_changed)
-        ab_layout.addWidget(self.exportMethodCombo)
-
-        # 現在シーンを movies フォルダに書き出し（方式は上のプルダウンに従う）
-        self.playblastBtn = QPushButton("🎬  動画書き出し")
-        self.playblastBtn.setObjectName("refreshBtn")
-        self.playblastBtn.setToolTip("現在のシーンを Pipeline_Movie にシーン名と同名で書き出す")
-        self.playblastBtn.clicked.connect(self._playblast_current)
-        ab_layout.addWidget(self.playblastBtn)
+        # 現在リーブ（表示）中のフォルダに新規シーンを保存
+        self.saveNewBtn = QPushButton("✚  SAVE NEW SCENE")
+        self.saveNewBtn.setObjectName("refreshBtn")
+        self.saveNewBtn.setToolTip("現在ブラウザで開いている（リーブ中の）フォルダに新規シーンを保存")
+        self.saveNewBtn.clicked.connect(self._save_new_scene)
+        ab_layout.addWidget(self.saveNewBtn)
 
         self.importBtn = QPushButton("▤  IMPORT")
         self.importBtn.setObjectName("importBtn")
@@ -3079,7 +3085,56 @@ class OGPipelineWindow(QWidget):
         ab_layout.addWidget(self.openBtn)
 
         layout.addWidget(action_bar)
+
+        # ── 動画書き出し操作バー（ファイル操作バーの一つ下） ──
+        layout.addWidget(self._build_movie_bar())
         return panel
+
+    def _build_movie_bar(self) -> QWidget:
+        """動画書き出し専用の操作バー。方式プルダウンは手動書き出し用（環境設定とは独立）。"""
+        movie_bar = QWidget()
+        movie_bar.setStyleSheet("background: #0a0d14; border-top: 1px solid #1e2435;")
+        movie_bar.setFixedHeight(48)
+        mb = QHBoxLayout(movie_bar)
+        mb.setContentsMargins(16, 7, 16, 7)
+        mb.setSpacing(8)
+
+        title = QLabel("🎬  動画書き出し")
+        title.setStyleSheet("color: #3a4055; font-size: 11px; letter-spacing: 1px;")
+        mb.addWidget(title)
+
+        # 保存時の自動書き出し ON/OFF（環境設定と同じ値。ここで素早く切替できる）
+        self.autoExportCheck = QCheckBox("保存時に自動書き出し")
+        self.autoExportCheck.setToolTip(
+            "ON のときだけ、シーン保存（Ctrl+S）で自動書き出しします（最小間隔は環境設定）。\n"
+            "OFF（既定）なら保存しても書き出しは走りません。")
+        self.autoExportCheck.setChecked(get_auto_export_on_save())
+        self.autoExportCheck.toggled.connect(self._on_auto_export_toggled)
+        mb.addWidget(self.autoExportCheck)
+
+        mb.addStretch(1)
+
+        mb.addWidget(QLabel("方式:"))
+        # 手動書き出し用の方式プルダウン（環境設定とは独立。初期値は設定から）
+        self.exportMethodCombo = QComboBox()
+        self.exportMethodCombo.addItem("プレイブラスト", "playblast")
+        self.exportMethodCombo.addItem("ハードウェア(裏)", "hardware")
+        self.exportMethodCombo.setToolTip(
+            "手動書き出しの方式（環境設定の自動更新とは独立）\n"
+            "プレイブラスト: 現在のビューを撮る（一瞬画面が止まる）\n"
+            "ハードウェア(裏): 別プロセスでレンダー（手元を止めない／画面に出ない）")
+        idx = self.exportMethodCombo.findData(get_export_method())
+        if idx >= 0:
+            self.exportMethodCombo.setCurrentIndex(idx)
+        mb.addWidget(self.exportMethodCombo)
+
+        # 現在シーンを Pipeline_Movie に書き出し（最小間隔は無視＝常に実行）
+        self.playblastBtn = QPushButton("🎬  動画書き出し")
+        self.playblastBtn.setObjectName("refreshBtn")
+        self.playblastBtn.setToolTip("現在のシーンを Pipeline_Movie にシーン名と同名で書き出す（手動は間隔制限なし）")
+        self.playblastBtn.clicked.connect(self._playblast_current)
+        mb.addWidget(self.playblastBtn)
+        return movie_bar
 
     def _build_detail_panel(self) -> QWidget:
         self.detailPanel = DetailPanel()
@@ -3176,6 +3231,7 @@ class OGPipelineWindow(QWidget):
 
     def _on_folder_selected(self, folder):
         # フォルダ（ショット／工程フォルダ等）選択 → 配下の最新動画を再生
+        self._current_folder = folder    # リーブ中フォルダ（新規保存先の候補）
         self._selected_path = ""
         self.openBtn.setEnabled(False)
         self.importBtn.setEnabled(False)
@@ -3309,6 +3365,7 @@ class OGPipelineWindow(QWidget):
             self.detailPanel.clear()
             return
         self._selected_path = info["abs"]
+        self._current_folder = os.path.dirname(info["abs"])   # リーブ中フォルダ
         self.openBtn.setEnabled(True)
         self.importBtn.setEnabled(True)
         self.openFolderBtn.setEnabled(True)
@@ -3786,16 +3843,11 @@ class OGPipelineWindow(QWidget):
         # 現在のルート配下なら一覧を更新して新バージョンを反映
         self._apply_view()
 
-    def _on_export_method_changed(self, _idx):
-        method = self.exportMethodCombo.currentData() or "playblast"
-        set_export_method(method)
-        if method == "hardware":
-            self.statusLabel.setText("書き出し方式: ハードウェア（別プロセスで裏で書き出し）")
-        else:
-            self.statusLabel.setText("書き出し方式: プレイブラスト（現在のビューを撮影）")
-
     def _playblast_current(self):
-        """現在 Maya で開いているシーンを、選択中の方式で動画書き出しする。"""
+        """現在 Maya で開いているシーンを、手動プルダウンの方式で動画書き出しする。
+
+        手動書き出しは最小間隔を無視して常に実行する。
+        """
         try:
             import maya.cmds as cmds
             cur = cmds.file(q=True, sceneName=True) or ""
@@ -3813,12 +3865,68 @@ class OGPipelineWindow(QWidget):
         self._last_export_at[os.path.normcase(os.path.normpath(cur))] = time.time()
         method = self.exportMethodCombo.currentData() or "playblast"
         if method == "hardware":
-            ok, msg = export_hardware_background(cur)
+            ok, msg, proc = export_hardware_background(cur)
             self.statusLabel.setText(("🎬  " if ok else "⚠  ") + msg)
             if not ok:
                 QMessageBox.warning(self, "ハードウェア書き出し", msg)
+            elif proc is not None:
+                self._watch_hw_export(cur, proc, label="手動")
             return
         self._playblast(cur)
+
+    # ── ハードウェア書き出し（別プロセス）の完了監視 ─────────────
+    def _watch_hw_export(self, scene_path, proc, label=""):
+        """別プロセスの書き出し完了をポーリングし、完了時にステータスへログを出す。"""
+        if not hasattr(self, "_hw_watchers"):
+            self._hw_watchers = []
+        timer = QTimer(self)
+        started = time.time()
+
+        def _poll():
+            # 30分でタイムアウト監視を打ち切る（プロセスは残しても監視だけ終了）
+            if proc.poll() is None and (time.time() - started) < 1800:
+                return
+            timer.stop()
+            try:
+                self._hw_watchers.remove(timer)
+            except Exception:
+                pass
+            frames = find_scene_sequence(scene_path)
+            n = len(frames) if frames else 0
+            stem = Path(scene_path).stem
+            tag = (label + " ") if label else ""
+            if n > 0:
+                self.statusLabel.setText(
+                    "✅  %s動画書き出し完了: %s（連番 %d 枚）" % (tag, stem, n))
+                self.detailPanel.reload_video()
+                self._refresh_all_shots_if_open()
+            else:
+                detail = ""
+                try:
+                    logp = os.path.join(os.path.dirname(scene_path), VIDEO_SUBDIR,
+                                        stem, "_oghw_log.txt")
+                    if os.path.isfile(logp):
+                        with open(logp, "r", encoding="utf-8", errors="replace") as fh:
+                            detail = fh.read().strip().splitlines()[-1:] or [""]
+                            detail = detail[0]
+                except Exception:
+                    pass
+                self.statusLabel.setText(
+                    "⚠  %s書き出し完了しましたがフレーム未生成（_oghw_log.txt 参照）%s"
+                    % (tag, ("／" + detail) if detail else ""))
+
+        timer.timeout.connect(_poll)
+        timer.start(1000)
+        self._hw_watchers.append(timer)
+
+    def _refresh_all_shots_if_open(self):
+        dlg = getattr(self, "_all_shots_dlg", None)
+        if dlg is not None:
+            try:
+                if dlg.isVisible():
+                    dlg._update_visible()
+            except Exception:
+                pass
 
     def _playblast(self, scene_path):
         """シーンを movies フォルダに「シーン名と同名」でプレイブラスト書き出しする。"""
@@ -3912,8 +4020,11 @@ class OGPipelineWindow(QWidget):
             self.statusLabel.setText("⚠  プレイブラスト失敗（詳細はダイアログ参照）")
             return
 
-        self.statusLabel.setText(f"🎬  プレイブラスト: {seq_dir}（連番 {len(find_scene_sequence(scene_path))} 枚）")
+        self.statusLabel.setText(
+            f"✅  動画書き出し完了: {Path(scene_path).stem}"
+            f"（連番 {len(find_scene_sequence(scene_path))} 枚 → {seq_dir}）")
         self.detailPanel.reload_video()   # 選択中シーンならサイドバーで連番再生
+        self._refresh_all_shots_if_open()
 
     def _open_in_explorer(self):
         """選択中のシーンのフォルダを OS のファイラで開く（ファイルを選択状態にする）。"""
@@ -3972,6 +4083,66 @@ class OGPipelineWindow(QWidget):
         cmds.file(rename=save_path)
         cmds.file(save=True, type=ftype)
         self.statusLabel.setText(f"✓  保存しました: {Path(save_path).name}")
+
+    def _save_new_scene(self):
+        """現在ブラウザでリーブ中のフォルダを既定にして、新規シーンを保存する。"""
+        try:
+            import maya.cmds as cmds
+        except ImportError:
+            QMessageBox.information(
+                self, "SAVE NEW SCENE（スタンドアロンモード）",
+                "Maya 内で実行すると、現在リーブ中のフォルダを既定にした\n"
+                "保存ダイアログを表示し、新規シーンとして保存します。",
+                QMessageBox.Ok,
+            )
+            return
+
+        # 保存先フォルダ: リーブ中フォルダ → 選択中ファイルのフォルダ → ルート
+        start = self._current_folder or ""
+        if not start and self._selected_path:
+            start = os.path.dirname(self._selected_path)
+        if not start and self.active_root:
+            start = str(self.active_root)
+        if not start or not os.path.isdir(start):
+            self.statusLabel.setText("保存先フォルダが未確定です（ブラウザでフォルダを選択してください）")
+            return
+
+        # 未保存の変更があれば確認（新規シーン作成で破棄されるため）
+        if cmds.file(q=True, modified=True):
+            r = QMessageBox.question(
+                self, "新規シーン",
+                "現在のシーンに未保存の変更があります。\n"
+                "新規シーンを作成すると失われます。続行しますか？",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if r != QMessageBox.Yes:
+                return
+
+        res = cmds.fileDialog2(
+            fileMode=0,
+            caption="Save New Scene",
+            startingDirectory=start,
+            fileFilter="Maya ASCII (*.ma);;Maya Binary (*.mb)",
+        )
+        if not res:
+            return
+        save_path = res[0]
+        ftype = "mayaAscii" if save_path.lower().endswith(".ma") else "mayaBinary"
+        try:
+            cmds.file(new=True, force=True)          # 新規シーン
+            cmds.file(rename=save_path)
+            cmds.file(save=True, type=ftype)
+        except Exception as e:
+            self.statusLabel.setText("⚠  新規保存に失敗しました: %s" % e)
+            QMessageBox.warning(self, "新規保存失敗", str(e))
+            return
+        self.statusLabel.setText(f"✓  新規シーンを保存しました: {Path(save_path).name}")
+        self._apply_view()   # 一覧に反映
+        # 保存したフォルダまでブラウザを展開
+        try:
+            self.browser.reveal_path(save_path)
+        except Exception:
+            pass
 
 
 # ─── エントリーポイント ────────────────────────────────────────────────────────
