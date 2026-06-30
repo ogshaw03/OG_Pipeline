@@ -3826,7 +3826,7 @@ class OGPipelineWindow(QWidget):
         # 隠さないようにする（伸びると不透明背景が下線を覆ってしまうため）。
         self.currentShotLabel = QLabel("")
         self.currentShotLabel.setStyleSheet(
-            "color: #4a9eff; font-size: 19px; font-weight: bold;"
+            "color: #e8a838; font-size: 19px; font-weight: bold;"
             " background: transparent; border: none;")
         self.currentShotLabel.setVisible(False)
         layout.addWidget(self.currentShotLabel, 0, Qt.AlignVCenter)
@@ -4172,8 +4172,8 @@ class OGPipelineWindow(QWidget):
         self.exportToggle.setArrowType(Qt.RightArrow)
         self.exportToggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.exportToggle.setStyleSheet(
-            "QToolButton { color: #9aa6c0; font-size: 11px; border: none;"
-            " padding: 1px; }"
+            "QToolButton { color: #9aa6c0; font-size: 12px; border: none;"
+            " padding: 2px; }"
             "QToolButton:hover { color: #e8c87a; }")
         self.exportToggle.clicked.connect(self._toggle_export_panel)
         mb.addWidget(self.exportToggle)
@@ -4187,7 +4187,7 @@ class OGPipelineWindow(QWidget):
 
         # 保存時の自動書き出し ON/OFF（環境設定と同じ値。ここで素早く切替できる）
         self.autoExportCheck = QCheckBox("保存時に自動書き出し")
-        self.autoExportCheck.setStyleSheet("font-size: 10px;")
+        self.autoExportCheck.setStyleSheet("font-size: 11px;")
         self.autoExportCheck.setToolTip(
             "ON のときだけ、シーン保存（Ctrl+S）で自動書き出しします（最小間隔は環境設定）。\n"
             "OFF（既定）なら保存しても書き出しは走りません。")
@@ -4200,12 +4200,12 @@ class OGPipelineWindow(QWidget):
         mrow.setContentsMargins(0, 0, 0, 0)
         mrow.setSpacing(6)
         mlab = QLabel("方式:")
-        mlab.setStyleSheet("font-size: 10px;")
+        mlab.setStyleSheet("font-size: 11px;")
         mrow.addWidget(mlab)
         self.exportMethodCombo = QComboBox()
-        self.exportMethodCombo.setFixedHeight(22)
+        self.exportMethodCombo.setFixedHeight(26)
         self.exportMethodCombo.setStyleSheet(
-            "QComboBox { font-size: 10px; min-height: 0; padding: 1px 6px; }")
+            "QComboBox { font-size: 11px; min-height: 0; padding: 2px 8px; }")
         self.exportMethodCombo.addItem("プレイブラスト", "playblast")
         self.exportMethodCombo.addItem("ハードウェア(裏)", "hardware")
         self.exportMethodCombo.setToolTip(
@@ -4222,9 +4222,9 @@ class OGPipelineWindow(QWidget):
         # 現在シーンを Pipeline_Movie に書き出し（最小間隔は無視＝常に実行）
         self.playblastBtn = QPushButton("🎬  書き出し実行")
         self.playblastBtn.setObjectName("refreshBtn")
-        self.playblastBtn.setFixedHeight(24)
+        self.playblastBtn.setFixedHeight(30)
         self.playblastBtn.setStyleSheet(
-            "#refreshBtn { font-size: 11px; min-height: 0; padding: 2px 8px; }")
+            "#refreshBtn { font-size: 12px; min-height: 0; padding: 4px 10px; }")
         self.playblastBtn.setToolTip("現在のシーンを Pipeline_Movie にシーン名と同名で書き出す（手動は間隔制限なし）")
         self.playblastBtn.clicked.connect(self._playblast_current)
         ec.addWidget(self.playblastBtn)
