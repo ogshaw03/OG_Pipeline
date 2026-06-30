@@ -3925,19 +3925,7 @@ class OGPipelineWindow(QWidget):
 
         # 「フォルダを開く」は詳細パネル（サイドバー）側に移動した
 
-        # 現在開いているシーンを、そのシーンのフォルダを既定にして別名保存する
-        self.saveAsBtn = QPushButton("⤓  SAVE AS")
-        self.saveAsBtn.setObjectName("refreshBtn")
-        self.saveAsBtn.setToolTip("現在のシーンを、開いているシーンのフォルダを既定にして保存")
-        self.saveAsBtn.clicked.connect(self._save_scene_as)
-        ab_layout.addWidget(self.saveAsBtn)
-
-        # 名前末尾の番号を +1 してローカルバージョンを上げて保存
-        self.versionUpBtn = QPushButton("⇧  VERSION UP")
-        self.versionUpBtn.setObjectName("refreshBtn")
-        self.versionUpBtn.setToolTip("ローカルバージョン（末尾番号 / v###）を +1 して同じフォルダに保存")
-        self.versionUpBtn.clicked.connect(self._version_up_save)
-        ab_layout.addWidget(self.versionUpBtn)
+        # 配置順: TAKE UP / SAVE TO STAGE / VERSION UP / SAVE AS / SAVE NEW SCENE
 
         # テイクバージョンを +1 して保存（工程設定の命名規則 _t## を増やす）
         self.takeUpBtn = QPushButton("⇧T  TAKE UP")
@@ -3952,6 +3940,20 @@ class OGPipelineWindow(QWidget):
         self.saveStageBtn.setObjectName("refreshBtn")
         self.saveStageBtn.clicked.connect(self._save_to_stage)
         ab_layout.addWidget(self.saveStageBtn)
+
+        # 名前末尾の番号を +1 してローカルバージョンを上げて保存
+        self.versionUpBtn = QPushButton("⇧  VERSION UP")
+        self.versionUpBtn.setObjectName("refreshBtn")
+        self.versionUpBtn.setToolTip("ローカルバージョン（末尾番号 / v###）を +1 して同じフォルダに保存")
+        self.versionUpBtn.clicked.connect(self._version_up_save)
+        ab_layout.addWidget(self.versionUpBtn)
+
+        # 現在開いているシーンを、そのシーンのフォルダを既定にして別名保存する
+        self.saveAsBtn = QPushButton("⤓  SAVE AS")
+        self.saveAsBtn.setObjectName("refreshBtn")
+        self.saveAsBtn.setToolTip("現在のシーンを、開いているシーンのフォルダを既定にして保存")
+        self.saveAsBtn.clicked.connect(self._save_scene_as)
+        ab_layout.addWidget(self.saveAsBtn)
 
         # 現在リーブ（表示）中のフォルダに新規シーンを保存
         self.saveNewBtn = QPushButton("✚  SAVE NEW SCENE")
