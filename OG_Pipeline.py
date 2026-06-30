@@ -2530,8 +2530,10 @@ class DetailPanel(QWidget):
         try:
             st = os.stat(abs_path)
             size, mtime = st.st_size, st.st_mtime
-        except Exception:
-            pass
+        except Exception as e:
+            print("[OG_Pipeline] update_info stat 失敗:", abs_path, e)
+        print("[OG_Pipeline] update_info:", abs_path, "mtime=", mtime,
+              "shown=", getattr(self, "_shown_mtime", None))
         # 同じファイル かつ 更新日時も同じならちらつき防止で作り直さない
         if (abs_path and abs_path == self._abs_path and not self._shot_folder
                 and mtime == getattr(self, "_shown_mtime", None)):
@@ -4502,6 +4504,7 @@ class OGPipelineWindow(QWidget):
         self._current_folder = os.path.dirname(info["abs"])   # リーブ中フォルダ
         self.openBtn.setEnabled(True)
         self.selectedLabel.setText(f"選択: {Path(info['abs']).name}")
+        print("[OG_Pipeline] _on_file_selected:", info.get("abs"))
         self.detailPanel.update_info(info["rel"], info["abs"], info["size"], info["mtime"])
 
     def _open_path(self, path):
