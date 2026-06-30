@@ -227,48 +227,75 @@ def stage_container(shot_folder, stage_subpath=""):
     return shot_folder
 
 
-def expand_stage_bases(shot_folder, stage_subpath=""):
-    """工程フォルダが入っている実フォルダ群を返す（複数サブパス・ワイルドカード対応）。
+def _parse_subpath_items(stage_subpath):
+    """改行/カンマ区切りの各サブパスを (pattern, name) に分解する。
 
-    stage_subpath は改行またはカンマで複数指定可。各パスのセグメントに `*` を使うと
-    その階層の任意のフォルダ（例: キャラ名）にマッチする。
-      例) ""            → [<ショット>]
-          "ma"          → [<ショット>/ma]
-          "*"           → <ショット> 直下の各フォルダ（= 各キャラ）
-          "*/motion"    → 各キャラ直下の motion フォルダ
-          "charA, charB"→ 指定キャラ2つ
-    存在するフォルダのみ返す（重複は除去）。
+    "pattern = name" 形式で各サブパスに表示名を付けられる（name 省略可）。
     """
-    patterns = [p.strip() for p in re.split(r"[\n,]", stage_subpath or "") if p.strip()]
-    if not patterns:
+    items = []
+    for raw in re.split(r"[\n,]", stage_subpath or ""):
+        raw = raw.strip()
+        if not raw:
+            continue
+        if "=" in raw:
+            pat, nm = raw.split("=", 1)
+            items.append((pat.strip(), nm.strip()))
+        else:
+            items.append((raw, ""))
+    return items
+
+
+def _glob_one(shot_folder, pat):
+    """単一サブパス（`*` 可）を shot_folder 起点で展開し、存在フォルダ群を返す。"""
+    cur = [shot_folder]
+    for seg in [s for s in pat.replace("\\", "/").split("/") if s]:
+        nxt = []
+        for d in cur:
+            if seg == "*":
+                try:
+                    for name in sorted(os.listdir(d)):
+                        full = os.path.join(d, name)
+                        if os.path.isdir(full) and name != VIDEO_SUBDIR:
+                            nxt.append(full)
+                except Exception:
+                    pass
+            else:
+                full = os.path.join(d, seg)
+                if os.path.isdir(full):
+                    nxt.append(full)
+        cur = nxt
+    return cur
+
+
+def expand_stage_bases(shot_folder, stage_subpath=""):
+    """サブパスが指すフォルダ群を返す（複数指定・ワイルドカード対応、重複除去）。"""
+    items = _parse_subpath_items(stage_subpath)
+    if not items:
         return [shot_folder]
-    bases = []
-    for pat in patterns:
-        segs = [s for s in pat.replace("\\", "/").split("/") if s]
-        cur = [shot_folder]
-        for seg in segs:
-            nxt = []
-            for d in cur:
-                if seg == "*":
-                    try:
-                        for name in sorted(os.listdir(d)):
-                            full = os.path.join(d, name)
-                            if os.path.isdir(full) and name != VIDEO_SUBDIR:
-                                nxt.append(full)
-                    except Exception:
-                        pass
-                else:
-                    full = os.path.join(d, seg)
-                    if os.path.isdir(full):
-                        nxt.append(full)
-            cur = nxt
-        bases.extend(cur)
     seen, out = set(), []
-    for b in bases:
-        k = os.path.normcase(os.path.normpath(b))
-        if k not in seen:
+    for pat, _nm in items:
+        for d in _glob_one(shot_folder, pat):
+            k = os.path.normcase(os.path.normpath(d))
+            if k not in seen:
+                seen.add(k)
+                out.append(d)
+    return out
+
+
+def expand_stage_bases_named(shot_folder, stage_subpath=""):
+    """[(base_dir, label), ...]。label = サブパスに付けた名前、無ければ末尾フォルダ名。"""
+    items = _parse_subpath_items(stage_subpath)
+    if not items:
+        base = shot_folder
+        return [(base, os.path.basename(base.rstrip("/\\")))]
+    seen, out = set(), []
+    for pat, nm in items:
+        for d in _glob_one(shot_folder, pat):
+            k = os.path.normcase(os.path.normpath(d))
+            if k in seen:
+                continue
             seen.add(k)
-            out.append(b)
+            out.append((d, nm if nm else os.path.basename(d.rstrip("/\\"))))
     return out
 
 
@@ -1644,7 +1671,7 @@ class GridVideoCell(QWidget):
     def __init__(self, title, media, stage="", on_click=None, payload=None,
                  title_color=None, folder=None, on_drill=None,
                  drill_label="⮞ リーブ", show_header=True, hover=True,
-                 cell_w=None, cell_h=None, parent=None):
+                 cell_w=None, cell_h=None, badges=None, parent=None):
         super().__init__(parent)
         # タイルサイズはインスタンスごとに上書き可（スライダーで可変）
         if cell_w:
@@ -1684,15 +1711,20 @@ class GridVideoCell(QWidget):
         if show_header:
             head = QHBoxLayout()
             head.setContentsMargins(0, 0, 0, 0)
+            head.setSpacing(4)
             name = QLabel(title)
             name.setStyleSheet("color: %s; font-size: 15px; font-weight: bold;"
                                % (title_color or "#e8c87a"))
             head.addWidget(name, 1)
-            if stage:
-                badge = QLabel(stage)
+            # バッジ: badges=[(text,color),...] を優先。無ければ従来の単一 stage。
+            blist = badges if badges else ([(stage, stage_color(stage))] if stage else [])
+            for btext, bcol in blist:
+                if not btext:
+                    continue
+                badge = QLabel(btext)
                 badge.setStyleSheet(
                     "color: #0f1117; background: %s; border-radius: 3px;"
-                    " padding: 2px 9px; font-size: 12px; font-weight: bold;" % stage_color(stage))
+                    " padding: 2px 9px; font-size: 12px; font-weight: bold;" % bcol)
                 head.addWidget(badge)
             lay.addLayout(head)
 
@@ -2145,12 +2177,12 @@ class AllShotsDialog(QDialog):
         self._shot_data = []
         has_subpath = bool((self._stage_subpath or "").strip())
         if has_subpath:
-            # サブパス設定あり: 「ショット親からの相対パス（ワイルドカード可）」で辿った
-            # フォルダ群（base）の『子フォルダ』が各タイル＝最新動画。
-            #   "Boss_003" → そのキャラの各モーションがタイル（バッジ＝キャラ名）
-            #   "*"        → 各直下フォルダの子（全キャラのモーション等）がタイル
-            for base in expand_stage_bases(shots_parent, self._stage_subpath):
-                parent_name = os.path.basename(base.rstrip("/\\"))
+            # サブパス設定あり: 辿ったフォルダ群（base, 表示名 label）の『子フォルダ』が
+            # 各タイル＝最新動画。バッジは [工程(設定時のみ), サブパス名]。
+            #   "Boss_003"      → そのキャラの各モーション（サブパス badge=Boss_003）
+            #   "Boss_003=ボス" → サブパス badge を『ボス』に
+            #   "*"             → 各キャラの各モーション（badge=各キャラ名）
+            for base, label in expand_stage_bases_named(shots_parent, self._stage_subpath):
                 try:
                     children = sorted(os.listdir(base))
                 except Exception:
@@ -2160,11 +2192,17 @@ class AllShotsDialog(QDialog):
                     if not os.path.isdir(cdir) or child == VIDEO_SUBDIR:
                         continue
                     media = pick_folder_media(cdir)
-                    if media:
-                        self._shot_data.append(
-                            {"name": "%s / %s" % (parent_name, child), "folder": cdir,
-                             "media": media, "title": child, "badge": parent_name,
-                             "stage": child, "shot": parent_name})
+                    if not media:
+                        continue
+                    stg = self._stage_badge_for(cdir)   # 工程設定があれば工程名、無ければ ""
+                    badges = []
+                    if stg:
+                        badges.append((stg, stage_color(stg)))
+                    badges.append((label, "#4a9eff"))   # サブパスバッジ（青）
+                    self._shot_data.append(
+                        {"name": "%s / %s" % (label, child), "folder": cdir,
+                         "media": media, "title": child, "badge": label,
+                         "badges": badges, "stage": stg or child, "shot": label})
             note = "サブパス配下のフォルダ単位の最新動画"
         else:
             # サブパス未設定: 従来どおりショットごとに最新工程
@@ -2221,6 +2259,23 @@ class AllShotsDialog(QDialog):
                 out.append((st["name"], d, has))
             return out
         return shot_stage_scene_list(shot_folder, self._stage_subpath)
+
+    def _stage_badge_for(self, motion_folder):
+        """工程設定がある場合、そのモーション内の最新工程名を返す（無ければ ""）。
+
+        各工程フォルダ（設定の folder）をモーション起点で解決し、シーンがある中で
+        最新のシーンを持つ工程を採用する。工程設定が無ければ "" （工程バッジ無し）。
+        """
+        if not self._stages:
+            return ""
+        best = None   # (scene_mtime, name)
+        for st in self._stages:
+            d = resolve_stage_dir(st, motion_folder, "")
+            if d and os.path.isdir(d):
+                smt = stage_latest_scene_mtime(d)
+                if smt is not None and (best is None or smt > best[0]):
+                    best = (smt, st["name"])
+        return best[1] if best else ""
 
     def _shot_stage_dirs(self, shot_folder):
         """(工程名, フォルダ) のリスト。工程設定があれば設定、無ければ走査。
@@ -2365,9 +2420,11 @@ class AllShotsDialog(QDialog):
         ch = max(60, int(cw * 90 / 208))
         r = c = 0
         for s in self._sorted_shot_data():
-            # タイトル＝マッチしたフォルダ（例: モーション）名、バッジ＝親（例: キャラ）名
+            # サブパス設定時は [工程, サブパス] の2バッジ、未設定時は単一の工程バッジ。
+            badges = s.get("badges")
             cell = GridVideoCell(s.get("title", s["name"]), s["media"],
-                                 stage=s.get("badge", ""),
+                                 stage=("" if badges else s.get("badge", "")),
+                                 badges=badges,
                                  on_click=self._select_shot, payload=s["folder"],
                                  folder=None, on_drill=None,
                                  cell_w=cw, cell_h=ch, parent=content)
@@ -3486,14 +3543,15 @@ class ProjectSettingsDialog(QDialog):
         # 複数指定できるよう複数行入力（1行に1パス。カンマ区切りも可）
         self.stageEdit = QPlainTextEdit(entry.get("stage_subpath", ""))
         self.stageEdit.setPlaceholderText(
-            "ショット親からの相対パス。1行に1つ（複数可）。例:\nBoss_003\nchr_001_03\n（* も可・空=直下）")
-        self.stageEdit.setFixedHeight(64)
+            "ショット親からの相対パス。1行に1つ。『パス = 表示名』で名前を付けられます。例:\n"
+            "Boss_003 = ボス\nchr_001\n*\n（* 可・空=直下。名前省略時は末尾フォルダ名）")
+        self.stageEdit.setFixedHeight(72)
         form.addRow("サブパス（この直下がタイル）:",
                     self._with_browse(self.stageEdit, self._browse_stage, "例から取得…"))
 
-        # サブパスが表す対象の呼称（UI のバッジ列見出しなどに使用。例: キャラ）
+        # バッジ列の見出し呼称（リスト表示の列名。例: キャラ）
         self.labelEdit = QLineEdit(entry.get("subpath_label", ""))
-        self.labelEdit.setPlaceholderText("サブパスの呼称（例: キャラ）。空なら『工程』")
+        self.labelEdit.setPlaceholderText("サブパス分類の呼称（リスト列見出し。例: キャラ）")
         form.addRow("サブパスの呼称:", self.labelEdit)
 
         # 次回も使用（起動時にこのプロジェクトを自動選択）。既定 ON。
