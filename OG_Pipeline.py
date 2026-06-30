@@ -2263,7 +2263,12 @@ class DetailPanel(QWidget):
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         layout.addWidget(scroll, 1)
 
+        self._root_layout = layout
         self.clear()
+
+    def add_bottom_widget(self, w):
+        """サイドバー最下部にウィジェットを追加する（動画書き出しグループ等）。"""
+        self._root_layout.addWidget(w)
 
     def _clear_layout(self):
         while self.contentLayout.count():
@@ -3697,9 +3702,9 @@ class OGPipelineWindow(QWidget):
         sep2.setStyleSheet("color: #1e2435;")
         layout.addWidget(sep2)
 
-        self.allShotsBtn = QPushButton("🎞  全ショット動画")
+        self.allShotsBtn = QPushButton("🎞  ショットリスト")
         self.allShotsBtn.setObjectName("refreshBtn")
-        self.allShotsBtn.setToolTip("全ショットの最新動画をグリッドで一覧・自動再生")
+        self.allShotsBtn.setToolTip("全ショットの最新動画を一覧（グリッド／リスト）・自動再生")
         self.allShotsBtn.clicked.connect(self._open_all_shots)
         layout.addWidget(self.allShotsBtn)
 
@@ -3969,22 +3974,22 @@ class OGPipelineWindow(QWidget):
         ab_layout.addWidget(self.openBtn)
 
         layout.addWidget(action_bar)
-
-        # ── 動画書き出し操作バー（ファイル操作バーの一つ下） ──
-        layout.addWidget(self._build_movie_bar())
         return panel
 
     def _build_movie_bar(self) -> QWidget:
-        """動画書き出し専用の操作バー。方式プルダウンは手動書き出し用（環境設定とは独立）。"""
+        """動画書き出しグループ（サイドバー下部に配置）。
+
+        誤クリックで OPEN SCENE の近くから書き出しが走らないよう、サイドバーへ隔離。
+        方式プルダウンは手動書き出し用（環境設定の自動更新とは独立）。
+        """
         movie_bar = QWidget()
         movie_bar.setStyleSheet("background: #0a0d14; border-top: 1px solid #1e2435;")
-        movie_bar.setFixedHeight(48)
-        mb = QHBoxLayout(movie_bar)
-        mb.setContentsMargins(16, 7, 16, 7)
-        mb.setSpacing(8)
+        mb = QVBoxLayout(movie_bar)
+        mb.setContentsMargins(12, 8, 12, 10)
+        mb.setSpacing(6)
 
         title = QLabel("🎬  動画書き出し")
-        title.setStyleSheet("color: #3a4055; font-size: 11px; letter-spacing: 1px;")
+        title.setStyleSheet("color: #6b7794; font-size: 11px; letter-spacing: 1px;")
         mb.addWidget(title)
 
         # 保存時の自動書き出し ON/OFF（環境設定と同じ値。ここで素早く切替できる）
@@ -3996,10 +4001,11 @@ class OGPipelineWindow(QWidget):
         self.autoExportCheck.toggled.connect(self._on_auto_export_toggled)
         mb.addWidget(self.autoExportCheck)
 
-        mb.addStretch(1)
-
-        mb.addWidget(QLabel("方式:"))
-        # 手動書き出し用の方式プルダウン（環境設定とは独立。初期値は設定から）
+        # 方式プルダウン（手動書き出し用。環境設定とは独立。初期値は設定から）
+        mrow = QHBoxLayout()
+        mrow.setContentsMargins(0, 0, 0, 0)
+        mrow.setSpacing(6)
+        mrow.addWidget(QLabel("方式:"))
         self.exportMethodCombo = QComboBox()
         self.exportMethodCombo.addItem("プレイブラスト", "playblast")
         self.exportMethodCombo.addItem("ハードウェア(裏)", "hardware")
@@ -4011,7 +4017,8 @@ class OGPipelineWindow(QWidget):
         if idx >= 0:
             self.exportMethodCombo.setCurrentIndex(idx)
         self.exportMethodCombo.activated.connect(self._on_manual_method_changed)
-        mb.addWidget(self.exportMethodCombo)
+        mrow.addWidget(self.exportMethodCombo, 1)
+        mb.addLayout(mrow)
 
         # 現在シーンを Pipeline_Movie に書き出し（最小間隔は無視＝常に実行）
         self.playblastBtn = QPushButton("🎬  動画書き出し")
@@ -4023,6 +4030,8 @@ class OGPipelineWindow(QWidget):
 
     def _build_detail_panel(self) -> QWidget:
         self.detailPanel = DetailPanel()
+        # 動画書き出しはサイドバー下部に隔離（OPEN SCENE の誤クリック回避）
+        self.detailPanel.add_bottom_widget(self._build_movie_bar())
         return self.detailPanel
 
     # ════════════════════════════════════════════════════════════════════
