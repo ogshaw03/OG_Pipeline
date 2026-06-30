@@ -3132,11 +3132,26 @@ class ProjectSettingsDialog(QDialog):
         title.setStyleSheet("font-size: 14px; color: #e8a838; letter-spacing: 1px;")
         outer.addWidget(title)
 
+        # プロジェクト選択プルダウン（既存を切替 or 新規）
+        psel = QHBoxLayout()
+        psel.addWidget(QLabel("プロジェクト:"))
+        self.projectCombo = QComboBox()
+        self._all_roots = load_roots()
+        for r in self._all_roots:
+            self.projectCombo.addItem(r["name"], r["name"])
+        self.projectCombo.addItem("＋ 新規プロジェクト", None)
+        cur_name = entry.get("name", "")
+        ci = self.projectCombo.findData(cur_name) if cur_name else -1
+        self.projectCombo.setCurrentIndex(ci if ci >= 0 else self.projectCombo.count() - 1)
+        self.projectCombo.activated.connect(self._on_project_selected)
+        psel.addWidget(self.projectCombo, 1)
+        outer.addLayout(psel)
+
         form = QFormLayout()
         form.setSpacing(10)
 
         self.nameEdit = QLineEdit(entry.get("name", ""))
-        self.nameEdit.setPlaceholderText("プロジェクト名（プルダウンに表示）")
+        self.nameEdit.setPlaceholderText("プロジェクト名（一覧に表示）")
         form.addRow("名前:", self.nameEdit)
 
         self.rootEdit = QLineEdit(entry.get("path", ""))
@@ -3310,6 +3325,29 @@ class ProjectSettingsDialog(QDialog):
         if len(parts) <= 1:
             return ""           # ショットフォルダ自身 → 直下に工程
         return "/".join(parts[1:])
+
+    # ── プロジェクト選択（切替 / 新規） ─────────────────
+    def _on_project_selected(self, _idx):
+        name = self.projectCombo.currentData()
+        if name is None:   # 新規プロジェクト
+            self._load_project({})
+            self.nameEdit.setFocus()
+            return
+        entry = find_root_entry(name) or {}
+        self._load_project(entry)
+
+    def _load_project(self, entry):
+        """フォーム各欄を entry の内容で更新する。"""
+        self.nameEdit.setText(entry.get("name", ""))
+        self.rootEdit.setText(entry.get("path", ""))
+        self.shotsEdit.setText(entry.get("shots_parent", ""))
+        self.stageEdit.setText(entry.get("stage_subpath", ""))
+        self.stageTable.setRowCount(0)
+        for st in entry.get("stages", []) or []:
+            self._add_stage_row(st)
+        cur_startup = get_startup_root()
+        nm = entry.get("name", "")
+        self.startupCheck.setChecked(cur_startup in (None, "", nm))
 
     # ── 工程リストの行操作 ─────────────────────────────
     def _add_stage_row(self, stage=None):
@@ -3593,6 +3631,7 @@ class OGPipelineWindow(QWidget):
         self._scan_thread = None
         self._pending_query = ""
         self._loading_combo = False
+        self._active_root_name = None
         self.active_root = None
         self.active_shots_parent = None
         self.active_stage_subpath = ""   # 各ショット内の工程フォルダ相対サブパス
@@ -3605,10 +3644,8 @@ class OGPipelineWindow(QWidget):
         self.setStyleSheet(STYLE)
         self._build_ui()
 
-        # 起動時: 登録済みルートを読み込み、必要なら自動適用ルートを選択する
+        # 起動時: 有効プロジェクトを決定（起動時設定→先頭）してブラウザに反映
         self._reload_roots_combo()
-        if self.rootCombo.count() > 0:
-            self._select_in_combo(get_startup_root())
         self._apply_root()
 
         # 現在のシーン名を定期的に更新（ツール外で開閉されても追従する）
@@ -3784,22 +3821,23 @@ class OGPipelineWindow(QWidget):
         layout.addLayout(title_col)
         layout.addStretch()
 
-        # 中央: 現在開いている Maya シーン名
-        # 背景を透明にしないと、QHBoxLayout でヘッダー全高に伸びた QLabel が
-        # 不透明背景で塗られ、ヘッダー下の金色ラインを隠してしまう。
-        self.currentSceneLabel = QLabel("🎬  (シーン未取得)")
-        self.currentSceneLabel.setStyleSheet(
-            "color: #e8c87a; font-size: 13px; font-weight: bold;"
-            " background: transparent; border: none;")
-        self.currentSceneLabel.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.currentSceneLabel)
-        # シーン名の隣にショットナンバーをバッジ表示
+        # 中央: ショットナンバー（バッジ）＋ シーン名。
+        # バッジは AlignVCenter で配置し、ヘッダー全高に伸びて金色ラインを
+        # 隠さないようにする（伸びると不透明背景が下線を覆ってしまうため）。
         self.currentShotLabel = QLabel("")
         self.currentShotLabel.setStyleSheet(
             "color: #0f1117; background: #4a9eff; border-radius: 3px;"
             " padding: 2px 9px; font-size: 12px; font-weight: bold;")
         self.currentShotLabel.setVisible(False)
-        layout.addWidget(self.currentShotLabel)
+        layout.addWidget(self.currentShotLabel, 0, Qt.AlignVCenter)
+        layout.addSpacing(10)   # ショットナンバーとシーン名の間に少し余白
+
+        self.currentSceneLabel = QLabel("🎬  (シーン未取得)")
+        self.currentSceneLabel.setStyleSheet(
+            "color: #e8c87a; font-size: 13px; font-weight: bold;"
+            " background: transparent; border: none;")
+        self.currentSceneLabel.setAlignment(Qt.AlignVCenter)
+        layout.addWidget(self.currentSceneLabel, 0, Qt.AlignVCenter)
         layout.addStretch()
 
         self.rootPathLabel = QLabel("▸  ルート未選択")
@@ -3819,12 +3857,14 @@ class OGPipelineWindow(QWidget):
         lab.setStyleSheet("color: #3a4055; font-size: 11px; letter-spacing: 1px;")
         layout.addWidget(lab)
 
-        self.rootCombo = QComboBox()
-        self.rootCombo.setMinimumWidth(240)
-        self.rootCombo.activated.connect(lambda _i: self._apply_root())
-        layout.addWidget(self.rootCombo)
+        # プロジェクト名は単純なテキスト（黄色）で表示。選択はプロジェクト設定から。
+        self.projectLabel = QLabel("（未選択）")
+        self.projectLabel.setStyleSheet(
+            "color: #e8a838; font-size: 13px; font-weight: bold;"
+            " background: transparent; border: none;")
+        layout.addWidget(self.projectLabel)
 
-        # プロジェクトの登録/編集・インポート/エクスポート・次回も使用は
+        # プロジェクトの選択/登録/編集・インポート/エクスポート・次回も使用は
         # すべてこのダイアログに集約した。
         self.addRootBtn = QPushButton("⚙  プロジェクト設定")
         self.addRootBtn.setObjectName("refreshBtn")
@@ -4146,6 +4186,7 @@ class OGPipelineWindow(QWidget):
 
         # 保存時の自動書き出し ON/OFF（環境設定と同じ値。ここで素早く切替できる）
         self.autoExportCheck = QCheckBox("保存時に自動書き出し")
+        self.autoExportCheck.setStyleSheet("font-size: 10px;")
         self.autoExportCheck.setToolTip(
             "ON のときだけ、シーン保存（Ctrl+S）で自動書き出しします（最小間隔は環境設定）。\n"
             "OFF（既定）なら保存しても書き出しは走りません。")
@@ -4157,8 +4198,11 @@ class OGPipelineWindow(QWidget):
         mrow = QHBoxLayout()
         mrow.setContentsMargins(0, 0, 0, 0)
         mrow.setSpacing(6)
-        mrow.addWidget(QLabel("方式:"))
+        mlab = QLabel("方式:")
+        mlab.setStyleSheet("font-size: 10px;")
+        mrow.addWidget(mlab)
         self.exportMethodCombo = QComboBox()
+        self.exportMethodCombo.setStyleSheet("font-size: 10px;")
         self.exportMethodCombo.addItem("プレイブラスト", "playblast")
         self.exportMethodCombo.addItem("ハードウェア(裏)", "hardware")
         self.exportMethodCombo.setToolTip(
@@ -4173,8 +4217,10 @@ class OGPipelineWindow(QWidget):
         ec.addLayout(mrow)
 
         # 現在シーンを Pipeline_Movie に書き出し（最小間隔は無視＝常に実行）
-        self.playblastBtn = QPushButton("🎬  動画書き出し")
+        self.playblastBtn = QPushButton("🎬  書き出し実行")
         self.playblastBtn.setObjectName("refreshBtn")
+        self.playblastBtn.setFixedHeight(24)
+        self.playblastBtn.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.playblastBtn.setToolTip("現在のシーンを Pipeline_Movie にシーン名と同名で書き出す（手動は間隔制限なし）")
         self.playblastBtn.clicked.connect(self._playblast_current)
         ec.addWidget(self.playblastBtn)
@@ -4198,29 +4244,34 @@ class OGPipelineWindow(QWidget):
     #  ルート（プロジェクト）管理
     # ════════════════════════════════════════════════════════════════════
     def _current_root_name(self):
-        idx = self.rootCombo.currentIndex()
-        return self.rootCombo.itemData(idx) if idx >= 0 else None
+        return getattr(self, "_active_root_name", None)
 
     def _reload_roots_combo(self, select_name=None):
-        """ストアからプルダウンを再構築する。起動時設定には ★ を付ける。"""
-        self._loading_combo = True
-        self.rootCombo.clear()
-        startup = get_startup_root()
-        for r in load_roots():
-            label = ("★  " + r["name"]) if r["name"] == startup else r["name"]
-            self.rootCombo.addItem(label, r["name"])
-        self._loading_combo = False
-        if select_name is not None:
-            self._select_in_combo(select_name)
+        """有効プロジェクトを決めてラベルに反映する（旧プルダウンの置き換え）。
+
+        select_name が指定され存在すればそれを、無ければ現在値→起動時設定→先頭、の順。
+        """
+        roots = load_roots()
+        names = [r["name"] for r in roots]
+        target = None
+        for cand in (select_name, getattr(self, "_active_root_name", None),
+                     get_startup_root()):
+            if cand and cand in names:
+                target = cand
+                break
+        if target is None and names:
+            target = names[0]
+        self._active_root_name = target
+        self.projectLabel.setText(target or "（未選択）")
+        self.projectLabel.setToolTip(target or "")
 
     def _select_in_combo(self, name):
-        for i in range(self.rootCombo.count()):
-            if self.rootCombo.itemData(i) == name:
-                self.rootCombo.setCurrentIndex(i)
-                return True
-        if self.rootCombo.count() > 0:
-            self.rootCombo.setCurrentIndex(0)
-        return False
+        """指定プロジェクトを有効にする（旧プルダウン選択の置き換え）。"""
+        roots = {r["name"] for r in load_roots()}
+        if name in roots:
+            self._active_root_name = name
+        self.projectLabel.setText(self._active_root_name or "（未選択）")
+        return self._active_root_name == name
 
     def _apply_root(self):
         """選択中のルートを有効化し、ブラウザに反映する。"""
