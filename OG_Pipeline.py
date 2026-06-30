@@ -356,12 +356,35 @@ def resolve_stage_dir(stage, shot_folder, stage_subpath=""):
     return ""
 
 
-def apply_stage_rename(stem, stage):
-    """工程の置換規則・初期テイク/ローカルを stem に適用した新しい stem を返す。"""
+def apply_stage_rename(stem, stage, all_stages=None):
+    """工程の置換規則・初期テイク/ローカルを stem に適用した新しい stem を返す。
+
+    置換は現シーン名基準: 工程リストの各トークン（リネーム先／工程名）のうち
+    現在の stem に含まれるものを検出し、対象工程のトークンへ置換する（最長一致優先）。
+    見つからなければ、対象工程の「リネーム元→リネーム先」でフォールバックする。
+    """
     new = stem
-    rf, rt = stage.get("rename_from", ""), stage.get("rename_to", "")
-    if rf and rt and rf in new:
-        new = new.replace(rf, rt)
+    target = (stage.get("rename_to") or stage.get("name") or "").strip()
+
+    replaced = False
+    if target and all_stages:
+        # 現シーン名に含まれる工程トークンの候補（自分以外）を長い順に試す
+        tokens = []
+        for s in all_stages:
+            for tok in (s.get("rename_to"), s.get("name")):
+                tok = (tok or "").strip()
+                if tok and tok != target and tok in new:
+                    tokens.append(tok)
+        for tok in sorted(set(tokens), key=len, reverse=True):
+            new = new.replace(tok, target)
+            replaced = True
+            break
+
+    if not replaced:
+        rf = stage.get("rename_from", "")
+        if rf and target and rf in new:
+            new = new.replace(rf, target)
+
     if stage.get("take"):
         new, _ = set_version_token(new, TAKE_RE, stage["take"])
     if stage.get("local"):
@@ -4709,7 +4732,7 @@ class OGPipelineWindow(QWidget):
             return
         target_dir = resolve_stage_dir(stage, shot_folder, self.active_stage_subpath)
         stem = os.path.splitext(os.path.basename(cur))[0]
-        new_stem = apply_stage_rename(stem, stage)
+        new_stem = apply_stage_rename(stem, stage, stages)
         saved = self._save_renamed(target_dir, new_stem, cmds)
         if saved:
             self.statusLabel.setText(
