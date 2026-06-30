@@ -2183,29 +2183,31 @@ class AllShotsDialog(QDialog):
             return None
 
         # 1) 工程サブフォルダ（<ベース>/<工程>）から探す
-        stage_dirs = self._shot_stage_dirs(shot_folder)
         entries = []
-        for name, d in stage_dirs:
+        for name, d in self._shot_stage_dirs(shot_folder):
             if d and os.path.isdir(d):
                 entries.append((name, pick_folder_media(d), stage_latest_scene_mtime(d)))
-        bases = expand_stage_bases(shot_folder, self._stage_subpath)
-        print("[OG_Pipeline] _shot_latest:", os.path.basename(shot_folder),
-              "subpath=", repr(self._stage_subpath), "stages_cfg=", bool(self._stages),
-              "bases=", [os.path.basename(b) for b in bases],
-              "stage_dirs=", [n for n, _ in stage_dirs])
         got = _pick(entries)
         if got:
             return got
 
         # 2) フォールバック: 展開ベース（キャラ等）直下に動画/シーンがある場合
         base_entries = []
-        for base in bases:
+        for base in expand_stage_bases(shot_folder, self._stage_subpath):
             if base and os.path.isdir(base):
                 base_entries.append((os.path.basename(base.rstrip("/\\")),
                                      pick_folder_media(base),
                                      stage_latest_scene_mtime(base)))
         got = _pick(base_entries)
-        return got if got else ("", None)
+        if got:
+            return got
+
+        # 3) 最終フォールバック: サブパスが一致しなくても、ショット配下を丸ごと
+        #    探索して動画/連番があれば表示する（取りこぼし防止）。
+        media = pick_folder_media(shot_folder)
+        if media:
+            return "", media
+        return "", None
 
     # ── 表示モード・ソート ──────────────────────────────
     def _set_view_mode(self, mode):
