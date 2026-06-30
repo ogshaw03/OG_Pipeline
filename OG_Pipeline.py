@@ -2554,12 +2554,13 @@ class ProjectSettingsDialog(QDialog):
         例: sh001/ma/<工程>/... のとき "ma"。空＝ショット直下に工程フォルダ。
     """
 
-    def __init__(self, parent=None, entry=None):
+    def __init__(self, parent=None, entry=None, current_startup=None):
         super().__init__(parent)
         self.setWindowTitle("プロジェクト設定")
         self.setStyleSheet(STYLE)
         self.setMinimumWidth(620)
         entry = entry or {}
+        self.imported = False   # ダイアログ内でインポートしたか（呼び出し側が再読込）
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 14, 16, 14)
@@ -2589,6 +2590,13 @@ class ProjectSettingsDialog(QDialog):
         form.addRow("工程フォルダのサブパス:",
                     self._with_browse(self.stageEdit, self._browse_stage, "例から取得…"))
 
+        # 次回も使用（起動時にこのプロジェクトを自動選択）。既定 ON。
+        # 既に別プロジェクトが起動時設定なら OFF、未設定/自分なら ON。
+        nm = entry.get("name", "")
+        self.startupCheck = QCheckBox("次回も使用（起動時にこのプロジェクトを自動選択）")
+        self.startupCheck.setChecked(current_startup in (None, "", nm))
+        form.addRow("起動時:", self.startupCheck)
+
         outer.addLayout(form)
 
         hint = QLabel(
@@ -2599,10 +2607,55 @@ class ProjectSettingsDialog(QDialog):
         hint.setStyleSheet("color: #4a5568; font-size: 10px;")
         outer.addWidget(hint)
 
+        # インポート / エクスポート（プロジェクト設定 JSON の取り込み・書き出し）
+        io_row = QHBoxLayout()
+        io_row.setSpacing(6)
+        importBtn = QPushButton("⭳  インポート")
+        importBtn.setObjectName("refreshBtn")
+        importBtn.setToolTip("プロジェクト設定 JSON を取り込む（既存に統合）")
+        importBtn.clicked.connect(self._do_import)
+        exportBtn = QPushButton("⭱  エクスポート")
+        exportBtn.setObjectName("refreshBtn")
+        exportBtn.setToolTip("登録済みプロジェクトを JSON として書き出す")
+        exportBtn.clicked.connect(self._do_export)
+        io_row.addWidget(importBtn)
+        io_row.addWidget(exportBtn)
+        io_row.addStretch(1)
+        outer.addLayout(io_row)
+
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._on_ok)
         btns.rejected.connect(self.reject)
         outer.addWidget(btns)
+
+    def use_startup(self):
+        return self.startupCheck.isChecked()
+
+    def _do_import(self):
+        fp, _ = QFileDialog.getOpenFileName(
+            self, "プロジェクト設定をインポート", str(Path.home()),
+            "JSON (*.json);;すべて (*.*)")
+        if not fp:
+            return
+        try:
+            n = import_roots_file(fp)
+            self.imported = True
+            QMessageBox.information(self, "インポート", "%d 件を取り込みました。" % n)
+        except Exception as e:
+            QMessageBox.warning(self, "インポート失敗", str(e))
+
+    def _do_export(self):
+        fp, _ = QFileDialog.getSaveFileName(
+            self, "プロジェクト設定をエクスポート",
+            os.path.join(str(Path.home()), "og_pipeline_roots.json"),
+            "JSON (*.json)")
+        if not fp:
+            return
+        try:
+            export_roots_file(fp)
+            QMessageBox.information(self, "エクスポート", "書き出しました:\n%s" % fp)
+        except Exception as e:
+            QMessageBox.warning(self, "エクスポート失敗", str(e))
 
     def _with_browse(self, edit, slot, label="参照…"):
         w = QWidget()
@@ -2962,34 +3015,13 @@ class OGPipelineWindow(QWidget):
         self.rootCombo.activated.connect(lambda _i: self._apply_root())
         layout.addWidget(self.rootCombo)
 
-        self.useBtn = QPushButton("★  次回も使用")
-        self.useBtn.setObjectName("refreshBtn")
-        self.useBtn.setToolTip("選択中のルートを次回起動時に自動設定（再度押すと解除）")
-        self.useBtn.clicked.connect(self._use_for_startup)
-        layout.addWidget(self.useBtn)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.VLine)
-        sep.setStyleSheet("color: #1e2435;")
-        layout.addWidget(sep)
-
+        # プロジェクトの登録/編集・インポート/エクスポート・次回も使用は
+        # すべてこのダイアログに集約した。
         self.addRootBtn = QPushButton("⚙  プロジェクト設定")
         self.addRootBtn.setObjectName("refreshBtn")
-        self.addRootBtn.setToolTip("フォルダを選んでプロジェクト（ルート）を新規登録")
+        self.addRootBtn.setToolTip("プロジェクトの登録/編集・インポート/エクスポート・起動時設定")
         self.addRootBtn.clicked.connect(self._add_root)
         layout.addWidget(self.addRootBtn)
-
-        self.importRootBtn = QPushButton("⭳  インポート")
-        self.importRootBtn.setObjectName("refreshBtn")
-        self.importRootBtn.setToolTip("ルート設定 JSON を取り込む")
-        self.importRootBtn.clicked.connect(self._import_roots)
-        layout.addWidget(self.importRootBtn)
-
-        self.exportRootBtn = QPushButton("⭱  エクスポート")
-        self.exportRootBtn.setObjectName("refreshBtn")
-        self.exportRootBtn.setToolTip("登録済みルートを JSON として書き出す")
-        self.exportRootBtn.clicked.connect(self._export_roots)
-        layout.addWidget(self.exportRootBtn)
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.VLine)
@@ -3370,21 +3402,31 @@ class OGPipelineWindow(QWidget):
 
     def _add_root(self):
         # 選択中のプロジェクトがあれば編集用に初期値として読み込む
-        cur_entry = None
         cur_name = self._current_root_name()
-        if cur_name:
-            cur_entry = find_root_entry(cur_name)
-        dlg = ProjectSettingsDialog(self, entry=cur_entry)
-        if not (dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()):
-            return
-        v = dlg.values()
-        add_root(v["name"], v["path"], v["shots_parent"], v["stage_subpath"])
-        self._reload_roots_combo(select_name=v["name"])
-        self._select_in_combo(v["name"])
-        self._apply_root()
-        sub = v["stage_subpath"] or "（ショット直下）"
-        self.statusLabel.setText(
-            f"✓  プロジェクト保存: {v['name']}（ショット親: {v['shots_parent']} ／ 工程サブパス: {sub}）")
+        cur_entry = find_root_entry(cur_name) if cur_name else None
+        dlg = ProjectSettingsDialog(self, entry=cur_entry,
+                                    current_startup=get_startup_root())
+        accepted = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
+        if accepted:
+            v = dlg.values()
+            add_root(v["name"], v["path"], v["shots_parent"], v["stage_subpath"])
+            # 「次回も使用」チェックを起動時設定に反映
+            if dlg.use_startup():
+                set_startup_root(v["name"])
+            elif get_startup_root() == v["name"]:
+                clear_startup_root()
+            self._reload_roots_combo(select_name=v["name"])
+            self._select_in_combo(v["name"])
+            self._apply_root()
+            sub = v["stage_subpath"] or "（ショット直下）"
+            self.statusLabel.setText(
+                f"✓  プロジェクト保存: {v['name']}（ショット親: {v['shots_parent']} ／ 工程サブパス: {sub}）")
+        elif dlg.imported:
+            # OK されなくてもインポートで増えた分を反映
+            self._reload_roots_combo(select_name=cur_name)
+            self._select_in_combo(cur_name)
+            self._apply_root()
+            self.statusLabel.setText("✓  プロジェクト設定をインポートしました")
 
     # ── フォルダ選択（配下の最新動画を表示） ───────────────
     def _is_shot_folder(self, folder):
@@ -3408,55 +3450,6 @@ class OGPipelineWindow(QWidget):
         label = "ショット" if self._is_shot_folder(folder) else "フォルダ"
         self.selectedLabel.setText(f"{label}: {Path(folder).name}（配下の最新動画）")
         self.detailPanel.show_folder_video(folder)
-
-    def _import_roots(self):
-        fp, _ = QFileDialog.getOpenFileName(
-            self, "ルート設定 JSON をインポート", str(Path.home()), "JSON Files (*.json)"
-        )
-        if not fp:
-            return
-        prev = self._current_root_name()
-        try:
-            count = import_roots_file(fp)
-        except Exception as e:
-            QMessageBox.warning(self, "インポート失敗", f"JSON を読み込めませんでした:\n{e}")
-            return
-        self._reload_roots_combo(select_name=prev)
-        self._apply_root()
-        self.statusLabel.setText(f"✓  インポート完了: {count} 件")
-
-    def _export_roots(self):
-        roots = load_roots()
-        if not roots:
-            QMessageBox.information(self, "エクスポート", "登録済みのルートがありません。")
-            return
-        fp, _ = QFileDialog.getSaveFileName(
-            self, "ルート設定 JSON をエクスポート",
-            str(Path.home() / "og_roots.json"), "JSON Files (*.json)"
-        )
-        if not fp:
-            return
-        if not fp.lower().endswith(".json"):
-            fp += ".json"
-        try:
-            export_roots_file(fp, roots)
-        except Exception as e:
-            QMessageBox.warning(self, "エクスポート失敗", str(e))
-            return
-        self.statusLabel.setText(f"✓  エクスポート: {fp}")
-
-    def _use_for_startup(self):
-        """選択中のルートを次回起動時の自動設定にする（トグル）。"""
-        name = self._current_root_name()
-        if not name:
-            return
-        if get_startup_root() == name:
-            clear_startup_root()
-            self.statusLabel.setText(f"次回起動時の自動設定を解除: {name}")
-        else:
-            set_startup_root(name)
-            self.statusLabel.setText(f"★  次回起動時に自動設定: {name}")
-        self._reload_roots_combo(select_name=name)  # ★ マーカーを更新（再スキャンなし）
 
     # ════════════════════════════════════════════════════════════════════
     #  表示（カラム表示／再帰検索）
