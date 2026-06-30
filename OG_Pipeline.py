@@ -3922,12 +3922,6 @@ class OGPipelineWindow(QWidget):
         self.saveNewBtn.clicked.connect(self._save_new_scene)
         ab_layout.addWidget(self.saveNewBtn)
 
-        self.importBtn = QPushButton("▤  IMPORT")
-        self.importBtn.setObjectName("importBtn")
-        self.importBtn.setEnabled(False)
-        self.importBtn.clicked.connect(self._import_scene)
-        ab_layout.addWidget(self.importBtn)
-
         self.openBtn = QPushButton("▶  OPEN SCENE")
         self.openBtn.setObjectName("openBtn")
         self.openBtn.setEnabled(False)
@@ -4087,7 +4081,6 @@ class OGPipelineWindow(QWidget):
         self._current_folder = folder    # リーブ中フォルダ（新規保存先の候補）
         self._selected_path = ""
         self.openBtn.setEnabled(False)
-        self.importBtn.setEnabled(False)
         self.openFolderBtn.setEnabled(False)
         is_shot = self._is_shot_folder(folder)
         label = "ショット" if is_shot else "フォルダ"
@@ -4104,7 +4097,6 @@ class OGPipelineWindow(QWidget):
 
         self._selected_path = ""
         self.openBtn.setEnabled(False)
-        self.importBtn.setEnabled(False)
         self.openFolderBtn.setEnabled(False)
         self.detailPanel.clear()
         self.selectedLabel.setText("ファイルを選択してください")
@@ -4165,7 +4157,6 @@ class OGPipelineWindow(QWidget):
         if not info:
             self._selected_path = ""
             self.openBtn.setEnabled(False)
-            self.importBtn.setEnabled(False)
             self.openFolderBtn.setEnabled(False)
             self.selectedLabel.setText("ファイルを選択してください")
             self.detailPanel.clear()
@@ -4173,7 +4164,6 @@ class OGPipelineWindow(QWidget):
         self._selected_path = info["abs"]
         self._current_folder = os.path.dirname(info["abs"])   # リーブ中フォルダ
         self.openBtn.setEnabled(True)
-        self.importBtn.setEnabled(True)
         self.openFolderBtn.setEnabled(True)
         self.selectedLabel.setText(f"選択: {Path(info['abs']).name}")
         self.detailPanel.update_info(info["rel"], info["abs"], info["size"], info["mtime"])
