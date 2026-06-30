@@ -273,6 +273,24 @@ def stage_has_scene(stage_folder):
     return False
 
 
+def stage_latest_scene_mtime(stage_folder):
+    """工程フォルダ配下の Maya シーン(.ma/.mb)の最新更新日時。無ければ None。"""
+    best = None
+    try:
+        for cur, dirs, files in os.walk(stage_folder):
+            for f in files:
+                if os.path.splitext(f)[1].lower() in MAYA_EXTENSIONS:
+                    try:
+                        m = os.path.getmtime(os.path.join(cur, f))
+                    except Exception:
+                        continue
+                    if best is None or m > best:
+                        best = m
+    except Exception:
+        pass
+    return best
+
+
 def shot_stage_scene_list(shot_folder, stage_subpath=""):
     """ショットの全工程フォルダと、各工程にシーンファイルがあるかを返す。
 
@@ -1990,18 +2008,15 @@ class AllShotsDialog(QDialog):
             full = os.path.join(shots_parent, d)
             if not os.path.isdir(full):
                 continue
-            stages = self._stage_media_list(full)
-            if stages:
-                stage_name, media, _mt = max(stages, key=lambda s: s[2])  # 最新工程
-            else:
-                media, stage_name = pick_folder_media(full), ""
-            if media:
+            # 最新工程は「シーンデータがある工程」を優先して決める
+            stage_name, media = self._shot_latest(full)
+            if media or stage_name:
                 self._shot_data.append(
                     {"name": d, "folder": full, "media": media, "stage": stage_name})
 
         self._foot.setText(
-            f"動画あり {len(self._shot_data)} / {len(names)} ショット　"
-            "（表示中のみ再生／タイル選択で工程別を表示）")
+            f"{len(self._shot_data)} / {len(names)} ショット　"
+            "（最新＝シーンがある工程／表示中のみ再生／タイル選択で工程別を表示）")
         self._rebuild()
 
     # ── 工程の解決（工程設定があれば優先） ─────────────────
@@ -2034,6 +2049,45 @@ class AllShotsDialog(QDialog):
                 out.append((st["name"], d, has))
             return out
         return shot_stage_scene_list(shot_folder, self._stage_subpath)
+
+    def _shot_stage_dirs(self, shot_folder):
+        """(工程名, フォルダ) のリスト。工程設定があれば設定、無ければ走査。"""
+        if self._stages:
+            return [(st["name"], resolve_stage_dir(st, shot_folder, self._stage_subpath))
+                    for st in self._stages]
+        base = stage_container(shot_folder, self._stage_subpath)
+        out = []
+        try:
+            for d in sorted(os.listdir(base)):
+                full = os.path.join(base, d)
+                if os.path.isdir(full) and d != VIDEO_SUBDIR:
+                    out.append((d, full))
+        except Exception:
+            pass
+        return out
+
+    def _shot_latest(self, shot_folder):
+        """グリッドのタイルに使う「最新工程」とそのメディアを返す。
+
+        シーンデータ(.ma/.mb)がある工程を優先し、その中で最も新しいシーンの工程を最新とする。
+        （動画しか無い工程を最新と誤認しないため）。
+        シーンのある工程が無ければ、動画が最新の工程にフォールバック。
+        戻り値: (stage_name, media)。どちらも無ければ ("", None)。
+        """
+        entries = []   # (name, media, scene_mtime)
+        for name, d in self._shot_stage_dirs(shot_folder):
+            if not d or not os.path.isdir(d):
+                continue
+            entries.append((name, pick_folder_media(d), stage_latest_scene_mtime(d)))
+        with_scene = [e for e in entries if e[2] is not None]
+        if with_scene:
+            name, media, _smt = max(with_scene, key=lambda e: e[2])
+            return name, media
+        with_media = [e for e in entries if e[1]]
+        if with_media:
+            name, media, _smt = max(with_media, key=lambda e: _media_mtime(e[1]))
+            return name, media
+        return "", None
 
     # ── 表示モード・ソート ──────────────────────────────
     def _on_view_changed(self, _idx):
