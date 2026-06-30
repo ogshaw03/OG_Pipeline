@@ -1046,6 +1046,9 @@ class GridVideoCell(QWidget):
         super().__init__(parent)
         self.setFixedWidth(self.CELL_W)
         self.setObjectName("gridCell")
+        # QWidget サブクラスはこの属性が無いと QSS の背景/枠（:hover 含む）が描画されない
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAttribute(Qt.WA_Hover, True)
         self.setStyleSheet(
             "#gridCell { background: transparent; border: 1px solid transparent;"
             " border-radius: 5px; }"
