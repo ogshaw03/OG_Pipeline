@@ -2518,11 +2518,21 @@ class AllShotsDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # 初回表示後はビューポート幅が確定するので、その実寸でタイルを組み直す
+        if not getattr(self, "_did_initial_layout", False):
+            self._did_initial_layout = True
+            QTimer.singleShot(0, self._rebuild)
         QTimer.singleShot(0, self._update_visible)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # ウィンドウサイズ変更に追従してタイルサイズを組み直す（連続変更はまとめる）
         self._update_visible()
+        if not hasattr(self, "_resize_timer"):
+            self._resize_timer = QTimer(self)
+            self._resize_timer.setSingleShot(True)
+            self._resize_timer.timeout.connect(self._rebuild)
+        self._resize_timer.start(200)
 
     def changeEvent(self, event):
         try:
