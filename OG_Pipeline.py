@@ -249,6 +249,50 @@ def shot_stage_list(shot_folder, stage_subpath=""):
     return out
 
 
+def _stage_rank(name):
+    """工程の表示順。lay 系 → anm 系 → その他、の順（同順位は名前順）。"""
+    low = name.lower()
+    if low.startswith("lay") or low.startswith("layout"):
+        r = 0
+    elif low.startswith("anm") or low.startswith("anim"):
+        r = 1
+    else:
+        r = 2
+    return (r, low)
+
+
+def stage_has_scene(stage_folder):
+    """工程フォルダ配下に Maya シーン(.ma/.mb)があるか（再帰、見つけ次第 True）。"""
+    try:
+        for cur, dirs, files in os.walk(stage_folder):
+            for f in files:
+                if os.path.splitext(f)[1].lower() in MAYA_EXTENSIONS:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def shot_stage_scene_list(shot_folder, stage_subpath=""):
+    """ショットの全工程フォルダと、各工程にシーンファイルがあるかを返す。
+
+    戻り値: [(stage_name, stage_folder, has_scene), ...]（工程順）。
+    工程フォルダ＝ <ショット>/<stage_subpath>/ 直下のサブフォルダ（Pipeline_Movie 除外）。
+    """
+    out = []
+    base = stage_container(shot_folder, stage_subpath)
+    try:
+        for d in os.listdir(base):
+            full = os.path.join(base, d)
+            if not os.path.isdir(full) or d == VIDEO_SUBDIR:
+                continue
+            out.append((d, full, stage_has_scene(full)))
+    except Exception:
+        pass
+    out.sort(key=lambda s: _stage_rank(s[0]))
+    return out
+
+
 def open_file_external(path):
     """OS の既定アプリでファイルを開く。"""
     try:
@@ -1345,7 +1389,7 @@ class GridVideoCell(QWidget):
 
     def __init__(self, title, media, stage="", on_click=None, payload=None,
                  title_color=None, folder=None, on_drill=None,
-                 drill_label="⮞ リーブ", parent=None):
+                 drill_label="⮞ リーブ", show_header=True, parent=None):
         super().__init__(parent)
         self.setFixedWidth(self.CELL_W)
         self.setObjectName("gridCell")
@@ -1372,19 +1416,20 @@ class GridVideoCell(QWidget):
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(2)
 
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 0)
-        name = QLabel(title)
-        name.setStyleSheet("color: %s; font-size: 15px; font-weight: bold;"
-                           % (title_color or "#e8c87a"))
-        head.addWidget(name, 1)
-        if stage:
-            badge = QLabel(stage)
-            badge.setStyleSheet(
-                "color: #0f1117; background: %s; border-radius: 3px;"
-                " padding: 2px 9px; font-size: 12px; font-weight: bold;" % stage_color(stage))
-            head.addWidget(badge)
-        lay.addLayout(head)
+        if show_header:
+            head = QHBoxLayout()
+            head.setContentsMargins(0, 0, 0, 0)
+            name = QLabel(title)
+            name.setStyleSheet("color: %s; font-size: 15px; font-weight: bold;"
+                               % (title_color or "#e8c87a"))
+            head.addWidget(name, 1)
+            if stage:
+                badge = QLabel(stage)
+                badge.setStyleSheet(
+                    "color: #0f1117; background: %s; border-radius: 3px;"
+                    " padding: 2px 9px; font-size: 12px; font-weight: bold;" % stage_color(stage))
+                head.addWidget(badge)
+            lay.addLayout(head)
 
         if on_click:
             self.setCursor(Qt.PointingHandCursor)
@@ -1711,7 +1756,8 @@ class AllShotsDialog(QDialog):
         self.setStyleSheet(STYLE)
         self._shots_parent = shots_parent
         self._sort_mode = "shot"
-        self._cells = []        # グリッド（ショット）タイル
+        self._view_mode = "grid"   # "grid" / "list"
+        self._cells = []        # グリッド/リストのショットタイル
         self._side_cells = []   # サイドバー（工程）タイル
 
         outer = QVBoxLayout(self)
@@ -1728,6 +1774,13 @@ class AllShotsDialog(QDialog):
         title.setStyleSheet("font-size: 14px; color: #e8a838; letter-spacing: 2px;")
         hl.addWidget(title)
         hl.addStretch()
+        hl.addWidget(QLabel("表示:"))
+        self._viewCombo = QComboBox()
+        self._viewCombo.addItem("グリッド", "grid")
+        self._viewCombo.addItem("リスト", "list")
+        self._viewCombo.activated.connect(self._on_view_changed)
+        hl.addWidget(self._viewCombo)
+        hl.addSpacing(12)
         hl.addWidget(QLabel("並び替え:"))
         self._sortCombo = QComboBox()
         self._sortCombo.addItems(["ショット名", "工程"])
@@ -1739,13 +1792,8 @@ class AllShotsDialog(QDialog):
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
 
-        self._grid_content = QWidget()
-        self._grid = QGridLayout(self._grid_content)
-        self._grid.setContentsMargins(10, 10, 10, 10)
-        self._grid.setSpacing(10)
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
-        self._scroll.setWidget(self._grid_content)
         self._scroll.verticalScrollBar().valueChanged.connect(self._update_visible)
         splitter.addWidget(self._scroll)
 
@@ -1801,14 +1849,18 @@ class AllShotsDialog(QDialog):
         self._foot.setText(
             f"動画あり {len(self._shot_data)} / {len(names)} ショット　"
             "（表示中のみ再生／タイル選択で工程別を表示）")
-        self._rebuild_grid()
+        self._rebuild()
 
-    # ── グリッド構築・ソート ────────────────────────────
+    # ── 表示モード・ソート ──────────────────────────────
+    def _on_view_changed(self, _idx):
+        self._view_mode = self._viewCombo.currentData() or "grid"
+        self._rebuild()
+
     def _on_sort_changed(self, text):
         self._sort_mode = "stage" if text == "工程" else "shot"
-        self._rebuild_grid()
+        self._rebuild()
 
-    def _clear_cells(self, cells, layout):
+    def _clear_cells(self, cells, layout=None):
         for cell in cells:
             try:
                 cell.stop()
@@ -1818,30 +1870,125 @@ class AllShotsDialog(QDialog):
                 pass
         del cells[:]
 
-    def _rebuild_grid(self):
-        self._clear_cells(self._cells, self._grid)
+    def _sorted_shot_data(self):
         data = list(self._shot_data)
         if self._sort_mode == "stage":
             data.sort(key=lambda s: (s["stage"].lower(), s["name"].lower()))
         else:
             data.sort(key=lambda s: s["name"].lower())
+        return data
+
+    def _rebuild(self):
+        # 既存セルのスレッドを止めてから、コンテンツごと作り替える
+        self._clear_cells(self._cells)
+        if self._view_mode == "list":
+            self._rebuild_list()
+        else:
+            self._rebuild_grid()
+        QTimer.singleShot(0, self._update_visible)
+
+    def _rebuild_grid(self):
+        content = QWidget()
+        grid = QGridLayout(content)
+        grid.setContentsMargins(10, 10, 10, 10)
+        grid.setSpacing(10)
         r = c = 0
-        for s in data:
-            # グリッドのタイルは下部ボタンなし（リーブ・開くともサイドバー側に集約）
+        for s in self._sorted_shot_data():
             cell = GridVideoCell(s["name"], s["media"], stage=s["stage"],
                                  on_click=self._select_shot, payload=s["folder"],
-                                 folder=None, on_drill=None,
-                                 parent=self._grid_content)
-            self._grid.addWidget(cell, r, c, Qt.AlignLeft | Qt.AlignTop)
+                                 folder=None, on_drill=None, parent=content)
+            grid.addWidget(cell, r, c, Qt.AlignLeft | Qt.AlignTop)
             self._cells.append(cell)
             c += 1
             if c >= self.COLS:
                 c = 0
                 r += 1
-        # 余ったスペースを右・下へ逃がして、タイルを左上詰めにする
-        self._grid.setColumnStretch(self.COLS, 1)
-        self._grid.setRowStretch(r + 1, 1)
-        QTimer.singleShot(0, self._update_visible)
+        grid.setColumnStretch(self.COLS, 1)   # 余白を右・下へ逃がし左上詰め
+        grid.setRowStretch(r + 1, 1)
+        self._scroll.setWidget(content)        # 旧コンテンツは破棄される
+
+    def _rebuild_list(self):
+        content = QWidget()
+        v = QVBoxLayout(content)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(6)
+
+        # 列見出し
+        header = QWidget()
+        hh = QHBoxLayout(header)
+        hh.setContentsMargins(6, 0, 6, 0)
+        for text, w in (("ショット名", 150), ("最新動画", GridVideoCell.CELL_W + 8),
+                        ("工程", 0)):
+            lab = QLabel(text)
+            lab.setStyleSheet("color: #6b7794; font-size: 11px; font-weight: bold;")
+            if w:
+                lab.setFixedWidth(w)
+            hh.addWidget(lab, 0 if w else 1)
+        v.addWidget(header)
+
+        for s in self._sorted_shot_data():
+            v.addWidget(self._build_list_row(s, content))
+        v.addStretch(1)
+        self._scroll.setWidget(content)
+
+    def _build_list_row(self, s, parent):
+        row = QWidget(parent)
+        row.setObjectName("gridCell")
+        row.setAttribute(Qt.WA_StyledBackground, True)
+        row.setAttribute(Qt.WA_Hover, True)
+        row.setStyleSheet(
+            "#gridCell { background: transparent; border: 1px solid #1e2435;"
+            " border-radius: 5px; }"
+            "#gridCell:hover { background: #161c2b; border: 1px solid #e8a838; }")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(8, 6, 8, 6)
+        h.setSpacing(10)
+
+        # ショット名
+        nameLab = QLabel(s["name"])
+        nameLab.setFixedWidth(150)
+        nameLab.setStyleSheet("color: #e8c87a; font-size: 14px; font-weight: bold;")
+        nameLab.setWordWrap(True)
+        h.addWidget(nameLab, 0, Qt.AlignVCenter)
+
+        # 最新動画（プレビュータイル。ヘッダー無し）
+        cell = GridVideoCell(s["name"], s["media"], on_click=self._select_shot,
+                             payload=s["folder"], show_header=False, parent=row)
+        h.addWidget(cell, 0, Qt.AlignVCenter)
+        self._cells.append(cell)
+
+        # 工程バッジ（シーンファイルがある工程＝明るい / 無い工程＝暗い）
+        badges = QWidget()
+        bl = QHBoxLayout(badges)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(5)
+        stages = shot_stage_scene_list(s["folder"], self._stage_subpath)
+        if not stages:
+            empty = QLabel("—")
+            empty.setStyleSheet("color: #3a4055; font-size: 11px;")
+            bl.addWidget(empty)
+        for stage_name, _sf, has_scene in stages:
+            bl.addWidget(self._stage_badge(stage_name, has_scene))
+        bl.addStretch(1)
+        h.addWidget(badges, 1, Qt.AlignVCenter)
+        return row
+
+    @staticmethod
+    def _stage_badge(stage_name, has_scene):
+        """工程バッジ。has_scene=True は明るく、False は暗く表示する。"""
+        lab = QLabel(stage_name)
+        if has_scene:
+            col = stage_color(stage_name)
+            lab.setStyleSheet(
+                "color: #0f1117; background: %s; border-radius: 3px;"
+                " padding: 2px 9px; font-size: 12px; font-weight: bold;" % col)
+            lab.setToolTip("%s: シーンファイルあり" % stage_name)
+        else:
+            lab.setStyleSheet(
+                "color: #4a5568; background: #161c2b; border: 1px solid #2a3147;"
+                " border-radius: 3px; padding: 2px 9px; font-size: 12px;")
+            lab.setToolTip("%s: シーンファイルなし" % stage_name)
+        return lab
 
     # ── 工程別サイドバー ───────────────────────────────
     def _select_shot(self, folder):
