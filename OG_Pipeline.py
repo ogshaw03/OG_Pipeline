@@ -2103,23 +2103,28 @@ class AllShotsDialog(QDialog):
             if has_subpath:
                 # サブパス（ワイルドカード可）がマッチした各フォルダ＝1タイル＝最新動画。
                 # 例: shot/<キャラ>/<モーション> なら subpath="*/*" で各モーションがタイルに。
+                # タイル: タイトル＝マッチしたフォルダ名（例: モーション）、バッジ＝その親（例: キャラ）。
                 added = False
                 for udir in expand_stage_bases(full, self._stage_subpath):
                     if not udir or not os.path.isdir(udir):
                         continue
                     media = pick_folder_media(udir)
                     if media:
+                        u = udir.rstrip("/\\")
+                        motion = os.path.basename(u)
+                        parent = os.path.basename(os.path.dirname(u))
                         rel = os.path.relpath(udir, full).replace("\\", "/")
                         self._shot_data.append(
                             {"name": "%s / %s" % (d, rel), "folder": udir,
-                             "media": media,
-                             "stage": os.path.basename(udir.rstrip("/\\")), "shot": d})
+                             "media": media, "title": motion, "badge": parent,
+                             "stage": motion, "shot": d})
                         added = True
                 if not added:   # マッチ無し/動画無しはショット最新でフォールバック
                     stage_name, media = self._shot_latest(full)
                     if media:
                         self._shot_data.append(
                             {"name": d, "folder": full, "media": media,
+                             "title": d, "badge": stage_name,
                              "stage": stage_name, "shot": d})
             else:
                 # サブパス未設定 → 従来どおりショットごとに最新 1 つ
@@ -2127,6 +2132,7 @@ class AllShotsDialog(QDialog):
                 if media or stage_name:
                     self._shot_data.append(
                         {"name": d, "folder": full, "media": media,
+                         "title": d, "badge": stage_name,
                          "stage": stage_name, "shot": d})
 
         nshots = len({s.get("shot") for s in self._shot_data})
@@ -2280,8 +2286,9 @@ class AllShotsDialog(QDialog):
         grid.setSpacing(10)
         r = c = 0
         for s in self._sorted_shot_data():
-            # タイトル＝ショット/キャラ名、バッジ＝モーション（サブパス一つ下）名
-            cell = GridVideoCell(s.get("shot", s["name"]), s["media"], stage=s["stage"],
+            # タイトル＝マッチしたフォルダ（例: モーション）名、バッジ＝親（例: キャラ）名
+            cell = GridVideoCell(s.get("title", s["name"]), s["media"],
+                                 stage=s.get("badge", ""),
                                  on_click=self._select_shot, payload=s["folder"],
                                  folder=None, on_drill=None, parent=content)
             grid.addWidget(cell, r, c, Qt.AlignLeft | Qt.AlignTop)
