@@ -419,12 +419,15 @@ LOCAL_RE = make_token_re(DEFAULT_LOCAL_PREFIX)
 
 
 def _parse_version_prefix(field):
-    """工程のテイク/ローカル欄文字列から接頭辞を得る。't01'→'t' / 'take01'→'take' / 'C001'→'C'。
-    末尾に数字が無ければ None。"""
-    m = re.search(r"^(.*?)(\d+)\s*$", (field or "").strip())
-    if not m:
+    """工程のテイク/ローカル欄文字列から接頭辞を得る。
+    't01'→'t' / 'take01'→'take' / 'C001'→'C' / 't'→'t'（数字なしでも接頭辞として扱う）。
+    空、または数字だけ（接頭辞なし）の場合は None。"""
+    field = (field or "").strip()
+    if not field:
         return None
-    return m.group(1)
+    m = re.match(r"^(.*?)(\d*)$", field)   # 末尾の数字は任意
+    prefix = (m.group(1) if m else field).strip()
+    return prefix or None
 
 
 def version_token_re(stages, field, default_prefix):
@@ -534,7 +537,8 @@ def apply_stage_rename(stem, stage, all_stages=None):
     置換は現シーン名基準: 工程リストの各トークン（リネーム先／工程名）のうち
     現在の stem に含まれるものを検出し、対象工程のトークンへ置換する（最長一致優先）。
     見つからなければ、対象工程の「リネーム元→リネーム先」でフォールバックする。
-    テイク/ローカルの初期化は既定パターン（_t## / _v###）で行う。
+    テイク/ローカルは欄に数字が入っているときだけ、その値で初期化する（空欄なら据え置き）。
+    採番対象の接頭辞は各工程のテイク/ローカル欄から導く（_t## 固定でなく汎用）。
     """
     new = stem
     target = (stage.get("rename_to") or stage.get("name") or "").strip()
@@ -558,10 +562,13 @@ def apply_stage_rename(stem, stage, all_stages=None):
         if rf and target and rf in new:
             new = new.replace(rf, target)
 
-    if stage.get("take"):
-        new, _ = set_version_token(new, TAKE_RE, stage["take"])
-    if stage.get("local"):
-        new, _ = set_version_token(new, LOCAL_RE, stage["local"])
+    # テイク/ローカルは「数字入りの値」が入っている工程のときだけ初期化する。
+    if re.search(r"\d", stage.get("take") or ""):
+        take_re = version_token_re(all_stages, "take", DEFAULT_TAKE_PREFIX)
+        new, _ = set_version_token(new, take_re, stage["take"])
+    if re.search(r"\d", stage.get("local") or ""):
+        local_re = version_token_re(all_stages, "local", DEFAULT_LOCAL_PREFIX)
+        new, _ = set_version_token(new, local_re, stage["local"])
     return new
 
 
@@ -3687,7 +3694,9 @@ class ProjectSettingsDialog(QDialog):
         shint = QLabel("別工程へ保存＝現シーン名の『リネーム元→リネーム先』置換＋テイク/ローカル初期化。"
                        "例: 工程名=lay_pri / 工程フォルダ=ma/lay_pri / リネーム元=lay_pri / "
                        "リネーム先=anm_sec / テイク=t01 / ローカル=v001。"
-                       "TAKE UP はテイク欄の接頭辞（例 t）＋数字を+1、VERSION UP は名前末尾の番号を+1。")
+                       "テイク/ローカルは任意（空欄＝現シーンの番号を据え置き／数字入り＝その値で初期化）。"
+                       "TAKE UP はテイク欄の接頭辞（例 t・take・C 等／数字なしでも可）＋数字を+1、"
+                       "VERSION UP は名前末尾の番号を+1。")
         shint.setStyleSheet("color: #4a5568; font-size: 10px;")
         srow.addWidget(shint)
         outer.addLayout(srow)
