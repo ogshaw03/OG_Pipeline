@@ -220,31 +220,79 @@ def _media_mtime(media):
 
 
 def stage_container(shot_folder, stage_subpath=""):
-    """工程フォルダが入っている実フォルダ。stage_subpath があればその相対パス下。"""
+    """工程フォルダが入っている実フォルダ（単一・ワイルドカード無し用）。"""
     if stage_subpath:
         return os.path.join(shot_folder, *stage_subpath.replace("\\", "/").split("/"))
     return shot_folder
+
+
+def expand_stage_bases(shot_folder, stage_subpath=""):
+    """工程フォルダが入っている実フォルダ群を返す（複数サブパス・ワイルドカード対応）。
+
+    stage_subpath は改行またはカンマで複数指定可。各パスのセグメントに `*` を使うと
+    その階層の任意のフォルダ（例: キャラ名）にマッチする。
+      例) ""            → [<ショット>]
+          "ma"          → [<ショット>/ma]
+          "*"           → <ショット> 直下の各フォルダ（= 各キャラ）
+          "*/motion"    → 各キャラ直下の motion フォルダ
+          "charA, charB"→ 指定キャラ2つ
+    存在するフォルダのみ返す（重複は除去）。
+    """
+    patterns = [p.strip() for p in re.split(r"[\n,]", stage_subpath or "") if p.strip()]
+    if not patterns:
+        return [shot_folder]
+    bases = []
+    for pat in patterns:
+        segs = [s for s in pat.replace("\\", "/").split("/") if s]
+        cur = [shot_folder]
+        for seg in segs:
+            nxt = []
+            for d in cur:
+                if seg == "*":
+                    try:
+                        for name in sorted(os.listdir(d)):
+                            full = os.path.join(d, name)
+                            if os.path.isdir(full) and name != VIDEO_SUBDIR:
+                                nxt.append(full)
+                    except Exception:
+                        pass
+                else:
+                    full = os.path.join(d, seg)
+                    if os.path.isdir(full):
+                        nxt.append(full)
+            cur = nxt
+        bases.extend(cur)
+    seen, out = set(), []
+    for b in bases:
+        k = os.path.normcase(os.path.normpath(b))
+        if k not in seen:
+            seen.add(k)
+            out.append(b)
+    return out
 
 
 def shot_stage_list(shot_folder, stage_subpath=""):
     """ショットの各工程フォルダ（lay, anm 等）の最新メディアを返す。
 
     戻り値: [(stage_name, media, mtime), ...]（mtime 昇順）。
-    工程フォルダ＝ <ショット>/<stage_subpath>/ 直下のサブフォルダ（Pipeline_Movie は除外）。
-    stage_subpath が空ならショット直下を見る。
+    複数ベース（ワイルドカード/複数サブパス）のときは工程名を「<親>/<工程>」で表す。
     """
     out = []
-    base = stage_container(shot_folder, stage_subpath)
-    try:
-        for d in sorted(os.listdir(base)):
-            full = os.path.join(base, d)
-            if not os.path.isdir(full) or d == VIDEO_SUBDIR:
-                continue
-            media = pick_folder_media(full)
-            if media:
-                out.append((d, media, _media_mtime(media)))
-    except Exception:
-        pass
+    bases = expand_stage_bases(shot_folder, stage_subpath)
+    multi = len(bases) > 1
+    for base in bases:
+        parent = os.path.basename(base.rstrip("/\\"))
+        try:
+            for d in sorted(os.listdir(base)):
+                full = os.path.join(base, d)
+                if not os.path.isdir(full) or d == VIDEO_SUBDIR:
+                    continue
+                media = pick_folder_media(full)
+                if media:
+                    label = ("%s/%s" % (parent, d)) if multi else d
+                    out.append((label, media, _media_mtime(media)))
+        except Exception:
+            pass
     out.sort(key=lambda s: s[2])
     return out
 
@@ -298,16 +346,20 @@ def shot_stage_scene_list(shot_folder, stage_subpath=""):
     工程フォルダ＝ <ショット>/<stage_subpath>/ 直下のサブフォルダ（Pipeline_Movie 除外）。
     """
     out = []
-    base = stage_container(shot_folder, stage_subpath)
-    try:
-        for d in os.listdir(base):
-            full = os.path.join(base, d)
-            if not os.path.isdir(full) or d == VIDEO_SUBDIR:
-                continue
-            out.append((d, full, stage_has_scene(full)))
-    except Exception:
-        pass
-    out.sort(key=lambda s: _stage_rank(s[0]))
+    bases = expand_stage_bases(shot_folder, stage_subpath)
+    multi = len(bases) > 1
+    for base in bases:
+        parent = os.path.basename(base.rstrip("/\\"))
+        try:
+            for d in os.listdir(base):
+                full = os.path.join(base, d)
+                if not os.path.isdir(full) or d == VIDEO_SUBDIR:
+                    continue
+                label = ("%s/%s" % (parent, d)) if multi else d
+                out.append((label, full, stage_has_scene(full)))
+        except Exception:
+            pass
+    out.sort(key=lambda s: _stage_rank(s[0].split("/")[-1]))
     return out
 
 
@@ -1536,13 +1588,16 @@ _STAGE_PALETTE = [
 
 
 def stage_color(stage):
-    """工程名から安定した表示色を返す。既知工程は固定色、未知は名前ハッシュで割当。"""
+    """工程名から安定した表示色を返す。既知工程は固定色、未知は名前ハッシュで割当。
+
+    「<キャラ>/<工程>」形式のときは工程部分（末尾）で既知判定する。
+    """
     if not stage:
         return "#e8a838"
-    key = stage.lower()
+    key = stage.lower().split("/")[-1]
     if key in _STAGE_COLOR_MAP:
         return _STAGE_COLOR_MAP[key]
-    h = sum(ord(c) for c in key)
+    h = sum(ord(c) for c in stage.lower())
     return _STAGE_PALETTE[h % len(_STAGE_PALETTE)]
 
 
@@ -2087,19 +2142,25 @@ class AllShotsDialog(QDialog):
         return shot_stage_scene_list(shot_folder, self._stage_subpath)
 
     def _shot_stage_dirs(self, shot_folder):
-        """(工程名, フォルダ) のリスト。工程設定があれば設定、無ければ走査。"""
+        """(工程名, フォルダ) のリスト。工程設定があれば設定、無ければ走査。
+
+        複数ベース（ワイルドカード/複数サブパス）のときは工程名を「<親>/<工程>」に。
+        """
         if self._stages:
             return [(st["name"], resolve_stage_dir(st, shot_folder, self._stage_subpath))
                     for st in self._stages]
-        base = stage_container(shot_folder, self._stage_subpath)
+        bases = expand_stage_bases(shot_folder, self._stage_subpath)
+        multi = len(bases) > 1
         out = []
-        try:
-            for d in sorted(os.listdir(base)):
-                full = os.path.join(base, d)
-                if os.path.isdir(full) and d != VIDEO_SUBDIR:
-                    out.append((d, full))
-        except Exception:
-            pass
+        for base in bases:
+            parent = os.path.basename(base.rstrip("/\\"))
+            try:
+                for d in sorted(os.listdir(base)):
+                    full = os.path.join(base, d)
+                    if os.path.isdir(full) and d != VIDEO_SUBDIR:
+                        out.append((("%s/%s" % (parent, d)) if multi else d, full))
+            except Exception:
+                pass
         return out
 
     def _shot_latest(self, shot_folder):
@@ -2282,12 +2343,11 @@ class AllShotsDialog(QDialog):
         # 工程設定があれば設定順（上＝先頭工程）、無ければ更新の新しい順（上＝最新）
         order = stages if self._stages else list(reversed(stages))
 
+        # 工程名 → 実フォルダ（ワイルドカード/複数サブパスでも同じ命名で対応付け）
+        dirs_map = dict(self._shot_stage_dirs(folder))
+
         def _dir_for(name):
-            if self._stages:
-                for st in self._stages:
-                    if st["name"] == name:
-                        return resolve_stage_dir(st, folder, self._stage_subpath)
-            return os.path.join(stage_container(folder, self._stage_subpath), name)
+            return dirs_map.get(name, "")
 
         for stage_name, media, _mt in order:
             cell = GridVideoCell(stage_name, media, title_color=stage_color(stage_name),
@@ -2464,13 +2524,26 @@ class DetailPanel(QWidget):
 
     @staticmethod
     def _stage_of_path(media_path, folder, stage_subpath):
-        """再生メディアのパスから、それが属する工程フォルダ名を求める。無ければ ""。"""
+        """再生メディアのパスから、それが属する工程フォルダ名を求める。無ければ ""。
+
+        複数ベース（ワイルドカード/複数サブパス）のときは「<親>/<工程>」で返す。
+        """
         try:
-            base = stage_container(folder, stage_subpath)
-            rel = os.path.relpath(media_path, base)
-            parts = [p for p in rel.replace("\\", "/").split("/") if p]
-            if parts and parts[0] not in ("..", "."):
-                return parts[0]
+            mp = os.path.normcase(os.path.normpath(media_path))
+            bases = expand_stage_bases(folder, stage_subpath)
+            multi = len(bases) > 1
+            for base in bases:
+                try:
+                    rel = os.path.relpath(mp, os.path.normcase(os.path.normpath(base)))
+                except Exception:
+                    continue
+                if rel.startswith(".."):
+                    continue
+                parts = [p for p in rel.replace("\\", "/").split("/") if p and p != "."]
+                if parts:
+                    if multi:
+                        return "%s/%s" % (os.path.basename(base.rstrip("/\\")), parts[0])
+                    return parts[0]
         except Exception:
             pass
         return ""
@@ -3248,7 +3321,7 @@ class ProjectSettingsDialog(QDialog):
                     self._with_browse(self.shotsEdit, self._browse_shots))
 
         self.stageEdit = QLineEdit(entry.get("stage_subpath", ""))
-        self.stageEdit.setPlaceholderText("各ショット内の相対パス。例: ma （空＝ショット直下）")
+        self.stageEdit.setPlaceholderText("例: ma ／ * ／ */motion （空=ショット直下・複数は改行/カンマ）")
         form.addRow("工程フォルダのサブパス:",
                     self._with_browse(self.stageEdit, self._browse_stage, "例から取得…"))
 
@@ -3262,9 +3335,11 @@ class ProjectSettingsDialog(QDialog):
         outer.addLayout(form)
 
         hint = QLabel(
-            "工程フォルダがショット直下に無い場合（例: sh001/ma/lay_anm/Scenedata/…）、"
-            "「例から取得…」で任意の1ショットの工程フォルダが入っているフォルダ"
-            "（例: sh001/ma）を選ぶと、相対サブパス（ma）を自動入力します。")
+            "工程フォルダがショット直下に無い場合のサブパス。`*` は任意の1フォルダ"
+            "（例: キャラ名）にマッチし、改行/カンマで複数指定できます。\n"
+            "例: shot/sh002/<キャラ>/<工程>/… のように複数キャラがいるなら `*` と入力 "
+            "→ 各キャラ直下の工程を検出。さらに深い場合は `*/motion` など。\n"
+            "「例から取得…」で任意の1工程フォルダが入っているフォルダを選ぶと相対パスを補完します。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #4a5568; font-size: 10px;")
         outer.addWidget(hint)
