@@ -2101,18 +2101,21 @@ class AllShotsDialog(QDialog):
             if not os.path.isdir(full):
                 continue
             if has_subpath:
-                # サブパス設定あり → 一つ下（例: モーション）ごとに 1 タイル＝最新動画
+                # サブパス（ワイルドカード可）がマッチした各フォルダ＝1タイル＝最新動画。
+                # 例: shot/<キャラ>/<モーション> なら subpath="*/*" で各モーションがタイルに。
                 added = False
-                for label, udir in self._shot_stage_dirs(full):
+                for udir in expand_stage_bases(full, self._stage_subpath):
                     if not udir or not os.path.isdir(udir):
                         continue
                     media = pick_folder_media(udir)
                     if media:
+                        rel = os.path.relpath(udir, full).replace("\\", "/")
                         self._shot_data.append(
-                            {"name": "%s / %s" % (d, label), "folder": udir,
-                             "media": media, "stage": label, "shot": d})
+                            {"name": "%s / %s" % (d, rel), "folder": udir,
+                             "media": media,
+                             "stage": os.path.basename(udir.rstrip("/\\")), "shot": d})
                         added = True
-                if not added:   # 一つ下に該当が無ければショット最新でフォールバック
+                if not added:   # マッチ無し/動画無しはショット最新でフォールバック
                     stage_name, media = self._shot_latest(full)
                     if media:
                         self._shot_data.append(
@@ -2127,7 +2130,7 @@ class AllShotsDialog(QDialog):
                          "stage": stage_name, "shot": d})
 
         nshots = len({s.get("shot") for s in self._shot_data})
-        note = ("サブパスの一つ下＝モーション単位の最新動画" if has_subpath
+        note = ("サブパスにマッチしたフォルダ（例: モーション）単位の最新動画" if has_subpath
                 else "ショットごとの最新動画")
         self._foot.setText(
             f"{len(self._shot_data)} 件 / {nshots} ショット　（{note}／表示中のみ再生）")
@@ -3368,7 +3371,7 @@ class ProjectSettingsDialog(QDialog):
                     self._with_browse(self.shotsEdit, self._browse_shots))
 
         self.stageEdit = QLineEdit(entry.get("stage_subpath", ""))
-        self.stageEdit.setPlaceholderText("例: ma ／ * ／ */motion （空=ショット直下・複数は改行/カンマ）")
+        self.stageEdit.setPlaceholderText("タイル化するフォルダへの相対パス。例: */* ／ * （空=ショット単位）")
         form.addRow("工程フォルダのサブパス:",
                     self._with_browse(self.stageEdit, self._browse_stage, "例から取得…"))
 
@@ -3382,11 +3385,12 @@ class ProjectSettingsDialog(QDialog):
         outer.addLayout(form)
 
         hint = QLabel(
-            "工程フォルダがショット直下に無い場合のサブパス。`*` は任意の1フォルダ"
-            "（例: キャラ名）にマッチし、改行/カンマで複数指定できます。\n"
-            "例: shot/sh002/<キャラ>/<工程>/… のように複数キャラがいるなら `*` と入力 "
-            "→ 各キャラ直下の工程を検出。さらに深い場合は `*/motion` など。\n"
-            "「例から取得…」で任意の1工程フォルダが入っているフォルダを選ぶと相対パスを補完します。")
+            "ショットリストでタイルにしたいフォルダ（例: モーション）への相対パス。"
+            "`*` は任意の1フォルダにマッチ（改行/カンマで複数可）。マッチした各フォルダが"
+            "1タイル＝その配下の最新動画になります。個別の工程登録は不要です。\n"
+            "例) ショット/<キャラ>/<モーション>/… → `*/*`（各モーションがタイル）／"
+            "ショット/<モーション>/… → `*`／空欄ならショットごとに最新1つ（従来）。\n"
+            "「例から取得…」で1つのモーションフォルダを選ぶと相対パスを補完します。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #4a5568; font-size: 10px;")
         outer.addWidget(hint)
