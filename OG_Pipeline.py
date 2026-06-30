@@ -392,26 +392,61 @@ def shot_stage_scene_list(shot_folder, stage_subpath=""):
 
 
 # 命名規則トークン: 例 test_ep01_sh001_lay_pri_t01_v001 の _t01（テイク）/ _v001（ローカル）
-TAKE_RE = re.compile(r"(_t)(\d+)", re.I)
-LOCAL_RE = re.compile(r"(_v)(\d+)", re.I)
+# 接頭辞（t / v）と桁数（2 / 3）はプロジェクト設定で変更できる。区切りは '_' 固定。
+DEFAULT_TAKE_PREFIX = "t"
+DEFAULT_LOCAL_PREFIX = "v"
+DEFAULT_TAKE_DIGITS = 2
+DEFAULT_LOCAL_DIGITS = 3
 
 
-def bump_version_token(stem, regex):
-    """stem 内の最後のトークン番号を +1（桁数維持）。戻り値: (新stem, 変更したか)。"""
+def _clamp_digits(value, default):
+    """桁数を 1〜6 に収める。数値化できなければ default。"""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(6, n))
+
+
+def make_token_re(prefix):
+    """区切り '_' + 接頭辞 のトークン正規表現を作る。例 prefix='t' → (_t)(\\d+)。"""
+    return re.compile(r"(_%s)(\d+)" % re.escape(prefix or ""), re.I)
+
+
+# 既定（接頭辞 t / v）。プロジェクト未設定時のフォールバック。
+TAKE_RE = make_token_re(DEFAULT_TAKE_PREFIX)
+LOCAL_RE = make_token_re(DEFAULT_LOCAL_PREFIX)
+
+
+def _normalize_token_str(value, digits):
+    """'t1' → 't01' のように末尾の数字を digits 桁にゼロ埋め。数字が無ければそのまま。"""
+    value = (value or "").strip()
+    m = re.search(r"^(.*?)(\d+)\s*$", value)
+    if not m or not digits:
+        return value
+    return m.group(1) + str(int(m.group(2))).zfill(digits)
+
+
+def bump_version_token(stem, regex, digits=None):
+    """stem 内の最後のトークン番号を +1。digits 指定時はその桁数で正規化（未指定は現桁数維持）。
+    戻り値: (新stem, 変更したか)。"""
     matches = list(regex.finditer(stem))
     if not matches:
         return stem, False
     m = matches[-1]
-    width = len(m.group(2))
+    width = digits or len(m.group(2))
     n = int(m.group(2)) + 1
     new = m.group(1) + str(n).zfill(width)
     return stem[:m.start()] + new + stem[m.end():], True
 
 
-def set_version_token(stem, regex, value):
-    """stem 内の最後のトークンを value（例 't01' / 'v001'）に置換。戻り値: (新stem, 変更したか)。"""
+def set_version_token(stem, regex, value, digits=None):
+    """stem 内の最後のトークンを value（例 't01' / 'v001'）に置換。
+    digits 指定時は value の数字をその桁数に正規化する。戻り値: (新stem, 変更したか)。"""
     if not value:
         return stem, False
+    if digits:
+        value = _normalize_token_str(value, digits)
     matches = list(regex.finditer(stem))
     if not matches:
         return stem, False
@@ -466,13 +501,19 @@ def resolve_stage_dir(stage, shot_folder, stage_subpath=""):
     return ""
 
 
-def apply_stage_rename(stem, stage, all_stages=None):
+def apply_stage_rename(stem, stage, all_stages=None, token_cfg=None):
     """工程の置換規則・初期テイク/ローカルを stem に適用した新しい stem を返す。
 
     置換は現シーン名基準: 工程リストの各トークン（リネーム先／工程名）のうち
     現在の stem に含まれるものを検出し、対象工程のトークンへ置換する（最長一致優先）。
     見つからなければ、対象工程の「リネーム元→リネーム先」でフォールバックする。
+    token_cfg: {take_prefix, take_digits, local_prefix, local_digits}（接頭辞・桁数）。
     """
+    cfg = token_cfg or {}
+    take_re = make_token_re(cfg.get("take_prefix", DEFAULT_TAKE_PREFIX))
+    local_re = make_token_re(cfg.get("local_prefix", DEFAULT_LOCAL_PREFIX))
+    take_digits = cfg.get("take_digits", DEFAULT_TAKE_DIGITS)
+    local_digits = cfg.get("local_digits", DEFAULT_LOCAL_DIGITS)
     new = stem
     target = (stage.get("rename_to") or stage.get("name") or "").strip()
 
@@ -496,9 +537,9 @@ def apply_stage_rename(stem, stage, all_stages=None):
             new = new.replace(rf, target)
 
     if stage.get("take"):
-        new, _ = set_version_token(new, TAKE_RE, stage["take"])
+        new, _ = set_version_token(new, take_re, stage["take"], take_digits)
     if stage.get("local"):
-        new, _ = set_version_token(new, LOCAL_RE, stage["local"])
+        new, _ = set_version_token(new, local_re, stage["local"], local_digits)
     return new
 
 
@@ -965,6 +1006,15 @@ def _normalize_entries(data):
             "stage_subpath": str(e.get("stage_subpath", "")).strip().strip("/\\"),
             # サブパスが表す対象の呼称（UI 表示用。例: "キャラ"）。空なら既定表示。
             "subpath_label": str(e.get("subpath_label", "")).strip(),
+            # 命名規則トークン: テイク/ローカルの接頭辞と桁数（区切りは '_' 固定）。
+            "take_prefix": (str(e.get("take_prefix", DEFAULT_TAKE_PREFIX)).strip()
+                            or DEFAULT_TAKE_PREFIX),
+            "take_digits": _clamp_digits(e.get("take_digits", DEFAULT_TAKE_DIGITS),
+                                         DEFAULT_TAKE_DIGITS),
+            "local_prefix": (str(e.get("local_prefix", DEFAULT_LOCAL_PREFIX)).strip()
+                             or DEFAULT_LOCAL_PREFIX),
+            "local_digits": _clamp_digits(e.get("local_digits", DEFAULT_LOCAL_DIGITS),
+                                          DEFAULT_LOCAL_DIGITS),
             # 工程リスト（任意）。設定があれば工程ベースの保存に使う。
             "stages": _normalize_stages(e.get("stages")),
         })
@@ -1020,13 +1070,22 @@ def save_roots(roots):
 
 
 def add_root(name, path, shots_parent="", stage_subpath="", stages=None,
-             subpath_label=""):
+             subpath_label="", token_cfg=None):
     """ルートを追加（同名は上書き）し、名前順で保存する。"""
+    cfg = token_cfg or {}
     roots = [r for r in load_roots() if r["name"] != name]
     roots.append({"name": name, "path": path,
                   "shots_parent": (shots_parent or path),
                   "stage_subpath": (stage_subpath or "").strip().strip("/\\"),
                   "subpath_label": (subpath_label or "").strip(),
+                  "take_prefix": (str(cfg.get("take_prefix", DEFAULT_TAKE_PREFIX)).strip()
+                                  or DEFAULT_TAKE_PREFIX),
+                  "take_digits": _clamp_digits(cfg.get("take_digits", DEFAULT_TAKE_DIGITS),
+                                               DEFAULT_TAKE_DIGITS),
+                  "local_prefix": (str(cfg.get("local_prefix", DEFAULT_LOCAL_PREFIX)).strip()
+                                   or DEFAULT_LOCAL_PREFIX),
+                  "local_digits": _clamp_digits(cfg.get("local_digits", DEFAULT_LOCAL_DIGITS),
+                                                DEFAULT_LOCAL_DIGITS),
                   "stages": _normalize_stages(stages or [])})
     roots.sort(key=lambda r: r["name"].lower())
     save_roots(roots)
@@ -3594,6 +3653,40 @@ class ProjectSettingsDialog(QDialog):
         hint.setStyleSheet("color: #4a5568; font-size: 10px;")
         outer.addWidget(hint)
 
+        # ── 命名規則トークン（テイク/ローカルの接頭辞・桁数。区切りは '_' 固定）──
+        tok_row = QHBoxLayout()
+        tok_row.setSpacing(6)
+        tok_row.addWidget(QLabel("命名規則  テイク _"))
+        self.takePrefixEdit = QLineEdit(entry.get("take_prefix", DEFAULT_TAKE_PREFIX))
+        self.takePrefixEdit.setFixedWidth(44)
+        self.takePrefixEdit.setToolTip("テイクの接頭辞（既定 t → _t01）")
+        tok_row.addWidget(self.takePrefixEdit)
+        tok_row.addWidget(QLabel("桁:"))
+        self.takeDigitsSpin = QSpinBox()
+        self.takeDigitsSpin.setRange(1, 6)
+        self.takeDigitsSpin.setValue(_clamp_digits(entry.get("take_digits", DEFAULT_TAKE_DIGITS),
+                                                    DEFAULT_TAKE_DIGITS))
+        tok_row.addWidget(self.takeDigitsSpin)
+        tok_row.addSpacing(18)
+        tok_row.addWidget(QLabel("ローカル _"))
+        self.localPrefixEdit = QLineEdit(entry.get("local_prefix", DEFAULT_LOCAL_PREFIX))
+        self.localPrefixEdit.setFixedWidth(44)
+        self.localPrefixEdit.setToolTip("ローカルの接頭辞（既定 v → _v001）")
+        tok_row.addWidget(self.localPrefixEdit)
+        tok_row.addWidget(QLabel("桁:"))
+        self.localDigitsSpin = QSpinBox()
+        self.localDigitsSpin.setRange(1, 6)
+        self.localDigitsSpin.setValue(_clamp_digits(entry.get("local_digits", DEFAULT_LOCAL_DIGITS),
+                                                    DEFAULT_LOCAL_DIGITS))
+        tok_row.addWidget(self.localDigitsSpin)
+        tok_row.addStretch(1)
+        outer.addLayout(tok_row)
+        tok_hint = QLabel("TAKE UP / 別工程保存のテイク・ローカル番号（_t## / _v###）の接頭辞と桁数。"
+                          "採番・保存時にこの桁数へ正規化されます。")
+        tok_hint.setWordWrap(True)
+        tok_hint.setStyleSheet("color: #4a5568; font-size: 10px;")
+        outer.addWidget(tok_hint)
+
         # ── 工程リスト ──
         stage_title = QLabel("◈  工程リスト（設定すると工程ベースの保存が有効になります）")
         stage_title.setStyleSheet("font-size: 12px; color: #e8a838;")
@@ -3798,6 +3891,12 @@ class ProjectSettingsDialog(QDialog):
         for pat, nm in _parse_subpath_items(entry.get("stage_subpath", "")):
             self._add_subpath_row(pat, nm)
         self.labelEdit.setText(entry.get("subpath_label", ""))
+        self.takePrefixEdit.setText(entry.get("take_prefix", DEFAULT_TAKE_PREFIX))
+        self.takeDigitsSpin.setValue(_clamp_digits(entry.get("take_digits", DEFAULT_TAKE_DIGITS),
+                                                   DEFAULT_TAKE_DIGITS))
+        self.localPrefixEdit.setText(entry.get("local_prefix", DEFAULT_LOCAL_PREFIX))
+        self.localDigitsSpin.setValue(_clamp_digits(entry.get("local_digits", DEFAULT_LOCAL_DIGITS),
+                                                    DEFAULT_LOCAL_DIGITS))
         self.stageTable.setRowCount(0)
         for st in entry.get("stages", []) or []:
             self._add_stage_row(st)
@@ -3849,6 +3948,10 @@ class ProjectSettingsDialog(QDialog):
             # 複数行＝複数サブパス。全体の前後空白だけ除去（各行は展開側で処理）。
             "stage_subpath": self._subpaths_from_table(),
             "subpath_label": self.labelEdit.text().strip(),
+            "take_prefix": self.takePrefixEdit.text().strip() or DEFAULT_TAKE_PREFIX,
+            "take_digits": self.takeDigitsSpin.value(),
+            "local_prefix": self.localPrefixEdit.text().strip() or DEFAULT_LOCAL_PREFIX,
+            "local_digits": self.localDigitsSpin.value(),
             "stages": self._stages_from_table(),
         }
 
@@ -4095,6 +4198,7 @@ class OGPipelineWindow(QWidget):
         self.active_stage_subpath = ""   # 各ショット内の工程フォルダ相対サブパス
         self.active_subpath_label = ""   # サブパスの呼称（例: キャラ）
         self.active_stages = []          # 工程リスト（プロジェクト設定）
+        self.active_token_cfg = self._default_token_cfg()  # 命名規則トークン
         self._last_export_at = {}    # {正規化シーンパス: 最終書き出し time.time()}
         self._save_job = None        # SceneSaved scriptJob の ID
         self._current_folder = None  # ブラウザでリーブ中のフォルダ（新規保存先候補）
@@ -4739,6 +4843,11 @@ class OGPipelineWindow(QWidget):
         self.projectLabel.setText(self._active_root_name or "（未選択）")
         return self._active_root_name == name
 
+    @staticmethod
+    def _default_token_cfg():
+        return {"take_prefix": DEFAULT_TAKE_PREFIX, "take_digits": DEFAULT_TAKE_DIGITS,
+                "local_prefix": DEFAULT_LOCAL_PREFIX, "local_digits": DEFAULT_LOCAL_DIGITS}
+
     def _apply_root(self):
         """選択中のルートを有効化し、ブラウザに反映する。"""
         name = self._current_root_name()
@@ -4748,6 +4857,7 @@ class OGPipelineWindow(QWidget):
             self.active_subpath_label = ""
             self.active_stage_subpath = ""
             self.active_stages = []
+            self.active_token_cfg = self._default_token_cfg()
             self.rootPathLabel.setText("▸  ルート未登録")
             self.browser.set_root(None)
             self.statusLabel.setText(
@@ -4760,6 +4870,12 @@ class OGPipelineWindow(QWidget):
         self.active_stage_subpath = entry.get("stage_subpath", "") or ""
         self.active_subpath_label = entry.get("subpath_label", "") or ""
         self.active_stages = entry.get("stages", []) or []
+        self.active_token_cfg = {
+            "take_prefix": entry.get("take_prefix", DEFAULT_TAKE_PREFIX),
+            "take_digits": entry.get("take_digits", DEFAULT_TAKE_DIGITS),
+            "local_prefix": entry.get("local_prefix", DEFAULT_LOCAL_PREFIX),
+            "local_digits": entry.get("local_digits", DEFAULT_LOCAL_DIGITS),
+        }
         self.rootPathLabel.setText(f"▸  {self.active_root}")
         self._apply_view()
 
@@ -4773,7 +4889,11 @@ class OGPipelineWindow(QWidget):
         if accepted:
             v = dlg.values()
             add_root(v["name"], v["path"], v["shots_parent"], v["stage_subpath"],
-                     v.get("stages"), subpath_label=v.get("subpath_label", ""))
+                     v.get("stages"), subpath_label=v.get("subpath_label", ""),
+                     token_cfg={"take_prefix": v.get("take_prefix", DEFAULT_TAKE_PREFIX),
+                                "take_digits": v.get("take_digits", DEFAULT_TAKE_DIGITS),
+                                "local_prefix": v.get("local_prefix", DEFAULT_LOCAL_PREFIX),
+                                "local_digits": v.get("local_digits", DEFAULT_LOCAL_DIGITS)})
             # 「次回も使用」チェックを起動時設定に反映
             if dlg.use_startup():
                 set_startup_root(v["name"])
@@ -5417,10 +5537,14 @@ class OGPipelineWindow(QWidget):
             QMessageBox.warning(self, "TAKE UP", "保存済みのシーンがありません。")
             return
         stem, ext = os.path.splitext(os.path.basename(cur))
-        new_stem, ok = bump_version_token(stem, TAKE_RE)
+        cfg = getattr(self, "active_token_cfg", None) or self._default_token_cfg()
+        take_re = make_token_re(cfg.get("take_prefix", DEFAULT_TAKE_PREFIX))
+        new_stem, ok = bump_version_token(stem, take_re, cfg.get("take_digits"))
         if not ok:
+            tok = "_%s%s" % (cfg.get("take_prefix", DEFAULT_TAKE_PREFIX),
+                             "#" * _clamp_digits(cfg.get("take_digits"), DEFAULT_TAKE_DIGITS))
             QMessageBox.warning(self, "TAKE UP",
-                                "テイク番号（_t##）が見つかりませんでした:\n" + os.path.basename(cur))
+                                "テイク番号（%s）が見つかりませんでした:\n%s" % (tok, os.path.basename(cur)))
             return
         saved = self._save_renamed(os.path.dirname(cur), new_stem, cmds)
         if saved:
@@ -5472,7 +5596,8 @@ class OGPipelineWindow(QWidget):
             return
         target_dir = resolve_stage_dir(stage, shot_folder, self.active_stage_subpath)
         stem = os.path.splitext(os.path.basename(cur))[0]
-        new_stem = apply_stage_rename(stem, stage, stages)
+        new_stem = apply_stage_rename(stem, stage, stages,
+                                      getattr(self, "active_token_cfg", None))
         saved = self._save_renamed(target_dir, new_stem, cmds)
         if saved:
             self.statusLabel.setText(
