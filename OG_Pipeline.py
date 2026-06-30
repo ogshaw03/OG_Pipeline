@@ -1900,9 +1900,10 @@ class AllShotsDialog(QDialog):
     """
     COLS = 5
 
-    def __init__(self, shots_parent, parent=None, stage_subpath=""):
+    def __init__(self, shots_parent, parent=None, stage_subpath="", stages=None):
         super().__init__(parent)
         self._stage_subpath = stage_subpath or ""
+        self._stages = stages or []   # 工程設定（あれば優先して使う）
         self.setWindowFlags(Qt.Window)
         self.setWindowTitle("All Shots — 最新動画一覧")
         self.setMinimumSize(1200, 640)
@@ -1989,22 +1990,50 @@ class AllShotsDialog(QDialog):
             full = os.path.join(shots_parent, d)
             if not os.path.isdir(full):
                 continue
-            stages = shot_stage_list(full, self._stage_subpath)
+            stages = self._stage_media_list(full)
             if stages:
-                stage_name, media, _mt = stages[-1]   # 最新工程
+                stage_name, media, _mt = max(stages, key=lambda s: s[2])  # 最新工程
             else:
                 media, stage_name = pick_folder_media(full), ""
             if media:
-                base = stage_container(full, self._stage_subpath)
-                stage_folder = os.path.join(base, stage_name) if stage_name else full
                 self._shot_data.append(
-                    {"name": d, "folder": full, "media": media,
-                     "stage": stage_name, "stage_folder": stage_folder})
+                    {"name": d, "folder": full, "media": media, "stage": stage_name})
 
         self._foot.setText(
             f"動画あり {len(self._shot_data)} / {len(names)} ショット　"
             "（表示中のみ再生／タイル選択で工程別を表示）")
         self._rebuild()
+
+    # ── 工程の解決（工程設定があれば優先） ─────────────────
+    def _stage_media_list(self, shot_folder):
+        """各工程の最新メディア [(工程名, media, mtime), ...]。
+
+        工程設定があれば設定の工程・フォルダを使い、無ければフォルダ走査にフォールバック。
+        """
+        if self._stages:
+            out = []
+            for st in self._stages:
+                d = resolve_stage_dir(st, shot_folder, self._stage_subpath)
+                if d and os.path.isdir(d):
+                    m = pick_folder_media(d)
+                    if m:
+                        out.append((st["name"], m, _media_mtime(m)))
+            return out
+        return shot_stage_list(shot_folder, self._stage_subpath)
+
+    def _stage_scene_list(self, shot_folder):
+        """各工程のシーン有無 [(工程名, フォルダ, has_scene), ...]（工程順）。
+
+        工程設定があれば設定の工程・フォルダを使い、無ければフォルダ走査にフォールバック。
+        """
+        if self._stages:
+            out = []
+            for st in self._stages:
+                d = resolve_stage_dir(st, shot_folder, self._stage_subpath)
+                has = bool(d) and os.path.isdir(d) and stage_has_scene(d)
+                out.append((st["name"], d, has))
+            return out
+        return shot_stage_scene_list(shot_folder, self._stage_subpath)
 
     # ── 表示モード・ソート ──────────────────────────────
     def _on_view_changed(self, _idx):
@@ -2117,7 +2146,7 @@ class AllShotsDialog(QDialog):
         bl = QHBoxLayout(badges)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(5)
-        stages = shot_stage_scene_list(s["folder"], self._stage_subpath)
+        stages = self._stage_scene_list(s["folder"])
         if not stages:
             empty = QLabel("—")
             empty.setStyleSheet("color: #3a4055; font-size: 11px;")
@@ -2154,13 +2183,22 @@ class AllShotsDialog(QDialog):
             if it.widget():
                 it.widget().deleteLater()
         self._sideTitle.setText(f"◈  {Path(folder).name} — 工程別")
-        stages = shot_stage_list(folder, self._stage_subpath)
-        base = stage_container(folder, self._stage_subpath)
+        stages = self._stage_media_list(folder)
         if not stages:
             self._side_layout.addWidget(QLabel("工程フォルダに動画が見つかりません"))
-        for stage_name, media, _mt in reversed(stages):   # 新しい工程を上に
+        # 工程設定があれば設定順（上＝先頭工程）、無ければ更新の新しい順（上＝最新）
+        order = stages if self._stages else list(reversed(stages))
+
+        def _dir_for(name):
+            if self._stages:
+                for st in self._stages:
+                    if st["name"] == name:
+                        return resolve_stage_dir(st, folder, self._stage_subpath)
+            return os.path.join(stage_container(folder, self._stage_subpath), name)
+
+        for stage_name, media, _mt in order:
             cell = GridVideoCell(stage_name, media, title_color=stage_color(stage_name),
-                                 folder=os.path.join(base, stage_name),
+                                 folder=_dir_for(stage_name),
                                  on_drill=self._drill_to, hover=False,
                                  parent=self._side_content)
             self._side_layout.addWidget(cell)
@@ -3777,7 +3815,8 @@ class OGPipelineWindow(QWidget):
                 pass
         self._all_shots_dlg = AllShotsDialog(
             self.active_shots_parent, self,
-            stage_subpath=getattr(self, "active_stage_subpath", ""))
+            stage_subpath=getattr(self, "active_stage_subpath", ""),
+            stages=getattr(self, "active_stages", []))
         self._all_shots_dlg.show()
         self._all_shots_dlg.raise_()
 
