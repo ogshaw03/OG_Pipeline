@@ -5060,10 +5060,15 @@ class OGPipelineWindow(QWidget):
             self._hw_watchers = []
         timer = QTimer(self)
         started = time.time()
+        stem = Path(scene_path).stem
+        logp = os.path.join(os.path.dirname(scene_path), VIDEO_SUBDIR, stem,
+                            "_oghw_log.txt")
 
         def _poll():
-            # 30分でタイムアウト監視を打ち切る（プロセスは残しても監視だけ終了）
-            if proc.poll() is None and (time.time() - started) < 1800:
+            # 完了判定: プロセス終了 / ワーカーが最後に書く _oghw_log.txt の生成 /
+            # 30分のタイムアウト、のいずれか（mayabatch は終了が遅れることがある）。
+            done = (proc.poll() is not None) or os.path.isfile(logp)
+            if not done and (time.time() - started) < 1800:
                 return
             timer.stop()
             try:
@@ -5072,7 +5077,6 @@ class OGPipelineWindow(QWidget):
                 pass
             frames = find_scene_sequence(scene_path)
             n = len(frames) if frames else 0
-            stem = Path(scene_path).stem
             tag = (label + " ") if label else ""
             if n > 0:
                 self.statusLabel.setText(
