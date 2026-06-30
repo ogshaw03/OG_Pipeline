@@ -2171,19 +2171,36 @@ class AllShotsDialog(QDialog):
         シーンのある工程が無ければ、動画が最新の工程にフォールバック。
         戻り値: (stage_name, media)。どちらも無ければ ("", None)。
         """
-        entries = []   # (name, media, scene_mtime)
+        def _pick(entries):
+            ws = [e for e in entries if e[2] is not None]   # シーンがある工程を優先
+            if ws:
+                e = max(ws, key=lambda x: x[2])
+                return e[0], e[1]
+            wm = [e for e in entries if e[1]]                # 無ければ動画が最新
+            if wm:
+                e = max(wm, key=lambda x: _media_mtime(x[1]))
+                return e[0], e[1]
+            return None
+
+        # 1) 工程サブフォルダ（<ベース>/<工程>）から探す
+        entries = []
         for name, d in self._shot_stage_dirs(shot_folder):
-            if not d or not os.path.isdir(d):
-                continue
-            entries.append((name, pick_folder_media(d), stage_latest_scene_mtime(d)))
-        with_scene = [e for e in entries if e[2] is not None]
-        if with_scene:
-            name, media, _smt = max(with_scene, key=lambda e: e[2])
-            return name, media
-        with_media = [e for e in entries if e[1]]
-        if with_media:
-            name, media, _smt = max(with_media, key=lambda e: _media_mtime(e[1]))
-            return name, media
+            if d and os.path.isdir(d):
+                entries.append((name, pick_folder_media(d), stage_latest_scene_mtime(d)))
+        got = _pick(entries)
+        if got:
+            return got
+
+        # 2) フォールバック: 展開ベース（キャラ等）直下に動画/シーンがある場合
+        base_entries = []
+        for base in expand_stage_bases(shot_folder, self._stage_subpath):
+            if base and os.path.isdir(base):
+                base_entries.append((os.path.basename(base.rstrip("/\\")),
+                                     pick_folder_media(base),
+                                     stage_latest_scene_mtime(base)))
+        got = _pick(base_entries)
+        if got:
+            return got
         return "", None
 
     # ── 表示モード・ソート ──────────────────────────────
@@ -3395,7 +3412,18 @@ class ProjectSettingsDialog(QDialog):
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._on_ok)
         btns.rejected.connect(self.reject)
+        # Enter で誤って閉じない（テキスト入力確定とOKを混同しない）
+        for b in btns.buttons():
+            b.setAutoDefault(False)
+            b.setDefault(False)
         outer.addWidget(btns)
+
+    def keyPressEvent(self, event):
+        # Enter/Return では閉じない（入力欄の確定のみ）。OK はボタンで明示クリック。
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def use_startup(self):
         return self.startupCheck.isChecked()
