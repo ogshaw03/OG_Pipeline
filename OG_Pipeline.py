@@ -1043,7 +1043,7 @@ class GridVideoCell(QWidget):
 
     def __init__(self, title, media, stage="", on_click=None, payload=None,
                  title_color=None, folder=None, on_drill=None,
-                 drill_label="⮞ この工程へ移動", parent=None):
+                 drill_label="⮞ リーブ", parent=None):
         super().__init__(parent)
         self.setFixedWidth(self.CELL_W)
         self.setObjectName("gridCell")
@@ -1523,10 +1523,10 @@ class AllShotsDialog(QDialog):
             data.sort(key=lambda s: s["name"].lower())
         r = c = 0
         for s in data:
-            # グリッドのタイルは工程（ドリル）ボタンなし。📂開くのみ。
+            # グリッドのタイルは下部ボタンなし（リーブ・開くともサイドバー側に集約）
             cell = GridVideoCell(s["name"], s["media"], stage=s["stage"],
                                  on_click=self._select_shot, payload=s["folder"],
-                                 folder=s["stage_folder"], on_drill=None,
+                                 folder=None, on_drill=None,
                                  parent=self._grid_content)
             self._grid.addWidget(cell, r, c, Qt.AlignLeft | Qt.AlignTop)
             self._cells.append(cell)
