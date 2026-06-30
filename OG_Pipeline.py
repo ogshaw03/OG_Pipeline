@@ -2392,6 +2392,7 @@ class DetailPanel(QWidget):
         self._clear_layout()
         self._abs_path = ""
         self._shot_folder = ""
+        self._shown_mtime = None
         if hasattr(self, "openFolderBtn"):
             self.openFolderBtn.setEnabled(False)
         if hasattr(self, "video"):
@@ -2485,9 +2486,18 @@ class DetailPanel(QWidget):
             self.setUpdatesEnabled(True)
 
     def update_info(self, rel_path: str, abs_path: str, size: int, mtime: float):
-        # 同じファイルの再選択では作り直さない（ちらつき防止）
-        if abs_path and abs_path == self._abs_path and not self._shot_folder:
+        # 更新日時・サイズは選択のたびに実ファイルから取り直す
+        # （スキャン時にキャッシュした値は保存後などに古くなるため）
+        try:
+            st = os.stat(abs_path)
+            size, mtime = st.st_size, st.st_mtime
+        except Exception:
+            pass
+        # 同じファイル かつ 更新日時も同じならちらつき防止で作り直さない
+        if (abs_path and abs_path == self._abs_path and not self._shot_folder
+                and mtime == getattr(self, "_shown_mtime", None)):
             return
+        self._shown_mtime = mtime
         self.setUpdatesEnabled(False)
         try:
             self._update_info_body(rel_path, abs_path, size, mtime)
