@@ -2585,6 +2585,7 @@ class DetailPanel(QWidget):
         ext = p.suffix.lower()
         size_str = self._fmt_size(size)
         mtime_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d  %H:%M")
+        print("[OG_Pipeline] _update_info_body 表示:", p.name, "MODIFIED=", mtime_str)
 
         fn_label = QLabel(p.name)
         fn_label.setObjectName("detailFilename")
