@@ -3630,9 +3630,12 @@ class OGPipelineWindow(QWidget):
         layout.addStretch()
 
         # 中央: 現在開いている Maya シーン名
+        # 背景を透明にしないと、QHBoxLayout でヘッダー全高に伸びた QLabel が
+        # 不透明背景で塗られ、ヘッダー下の金色ラインを隠してしまう。
         self.currentSceneLabel = QLabel("🎬  (シーン未取得)")
         self.currentSceneLabel.setStyleSheet(
-            "color: #e8c87a; font-size: 13px; font-weight: bold;")
+            "color: #e8c87a; font-size: 13px; font-weight: bold;"
+            " background: transparent; border: none;")
         self.currentSceneLabel.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.currentSceneLabel)
         layout.addStretch()
