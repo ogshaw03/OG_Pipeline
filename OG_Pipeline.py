@@ -2543,6 +2543,32 @@ class DetailPanel(QWidget):
         finally:
             self.setUpdatesEnabled(True)
 
+    def refresh_file_times(self):
+        """表示中ファイルの更新日時/サイズを実ファイルから取り直し、変化があれば反映する。
+
+        選択中ファイルがツール外/Maya 内で保存された場合でも、再選択せずに
+        MODIFIED 表示を最新へ更新する（パネル全体は作り直さずラベルだけ書き換え）。
+        """
+        import datetime
+        if self._shot_folder or not self._abs_path:
+            return
+        if not getattr(self, "_mtimeVal", None):
+            return
+        try:
+            st = os.stat(self._abs_path)
+        except Exception:
+            return
+        if st.st_mtime == getattr(self, "_shown_mtime", None):
+            return
+        self._shown_mtime = st.st_mtime
+        try:
+            self._mtimeVal.setText(
+                datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d  %H:%M"))
+            if getattr(self, "_sizeVal", None):
+                self._sizeVal.setText(self._fmt_size(st.st_size))
+        except Exception:
+            pass
+
     def _update_info_body(self, rel_path, abs_path, size, mtime):
         self._abs_path = abs_path
         self._shot_folder = ""
@@ -2583,6 +2609,8 @@ class DetailPanel(QWidget):
         self.contentLayout.addWidget(type_label)
         self.contentLayout.addSpacing(4)
 
+        self._sizeVal = None
+        self._mtimeVal = None
         for key, val in [("SIZE", size_str), ("MODIFIED", mtime_str)]:
             row = QHBoxLayout()
             k = QLabel(key)
@@ -2593,6 +2621,10 @@ class DetailPanel(QWidget):
             row.addWidget(k)
             row.addWidget(v)
             self.contentLayout.addLayout(row)
+            if key == "SIZE":
+                self._sizeVal = v
+            else:
+                self._mtimeVal = v
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.HLine)
@@ -3819,6 +3851,11 @@ class OGPipelineWindow(QWidget):
             self.currentSceneLabel.setToolTip("")
             self.currentShotLabel.setText("")
             self.currentShotLabel.setVisible(False)
+        # 表示中ファイルの更新日時も追従させる（保存後に再選択しなくても反映）
+        try:
+            self.detailPanel.refresh_file_times()
+        except Exception:
+            pass
 
     # ════════════════════════════════════════════════════════════════════
     #  UI 構築
