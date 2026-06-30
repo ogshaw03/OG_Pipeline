@@ -2301,62 +2301,95 @@ class AllShotsDialog(QDialog):
         self._rebuild()
 
     # ── 工程の解決（工程設定があれば優先） ─────────────────
-    def _stage_media_list(self, shot_folder):
+    def _stage_subpath_for(self, subpath):
+        """工程解決に使うサブパス。サブパス指定時はタイルのフォルダが既に解決済み
+        （モーション）なので、その直下を工程とするため "" を使う。"""
+        if subpath is not None:
+            return subpath
+        return "" if (self._stage_subpath or "").strip() else self._stage_subpath
+
+    def _stage_media_list(self, shot_folder, subpath=None):
         """各工程の最新メディア [(工程名, media, mtime), ...]。
 
         工程設定があれば設定の工程・フォルダを使い、無ければフォルダ走査にフォールバック。
         """
+        sp = self._stage_subpath_for(subpath)
         if self._stages:
             out = []
             for st in self._stages:
-                d = resolve_stage_dir(st, shot_folder, self._stage_subpath)
+                d = resolve_stage_dir(st, shot_folder, sp)
                 if d and os.path.isdir(d):
                     m = pick_folder_media(d)
                     if m:
                         out.append((st["name"], m, _media_mtime(m)))
             return out
-        return shot_stage_list(shot_folder, self._stage_subpath)
+        return shot_stage_list(shot_folder, sp)
 
-    def _stage_scene_list(self, shot_folder):
+    def _stage_scene_list(self, shot_folder, subpath=None):
         """各工程のシーン有無 [(工程名, フォルダ, has_scene), ...]（工程順）。
 
         工程設定があれば設定の工程・フォルダを使い、無ければフォルダ走査にフォールバック。
         """
+        sp = self._stage_subpath_for(subpath)
         if self._stages:
             out = []
             for st in self._stages:
-                d = resolve_stage_dir(st, shot_folder, self._stage_subpath)
+                d = resolve_stage_dir(st, shot_folder, sp)
                 has = bool(d) and os.path.isdir(d) and stage_has_scene(d)
                 out.append((st["name"], d, has))
             return out
-        return shot_stage_scene_list(shot_folder, self._stage_subpath)
+        return shot_stage_scene_list(shot_folder, sp)
 
     def _stage_badge_for(self, motion_folder):
-        """工程設定がある場合、そのモーション内の最新工程名を返す（無ければ ""）。
+        """そのモーション内の最新工程名を返す（無ければ ""）。
 
-        各工程フォルダ（設定の folder）をモーション起点で解決し、シーンがある中で
-        最新のシーンを持つ工程を採用する。工程設定が無ければ "" （工程バッジ無し）。
+        工程設定があれば設定の工程フォルダ（folder）をモーション起点で解決し、
+        シーンがある中で最新のシーンを持つ工程を採用する。
+        工程設定が無い場合は、モーション直下の工程フォルダ（サブフォルダ）を走査して
+        最新シーンを持つフォルダ名を採用する（＝工程フォルダ名のバッジ）。
         """
-        if not self._stages:
-            return ""
         best = None   # (scene_mtime, name)
-        for st in self._stages:
-            d = resolve_stage_dir(st, motion_folder, "")
-            if d and os.path.isdir(d):
-                smt = stage_latest_scene_mtime(d)
-                if smt is not None and (best is None or smt > best[0]):
-                    best = (smt, st["name"])
-        return best[1] if best else ""
+        if self._stages:
+            for st in self._stages:
+                d = resolve_stage_dir(st, motion_folder, "")
+                if d and os.path.isdir(d):
+                    smt = stage_latest_scene_mtime(d)
+                    if smt is not None and (best is None or smt > best[0]):
+                        best = (smt, st["name"])
+            return best[1] if best else ""
+        # 工程設定なし: モーション直下の工程フォルダを検出して最新シーンの名前を返す
+        try:
+            subdirs = sorted(os.listdir(motion_folder))
+        except Exception:
+            subdirs = []
+        best_media = None  # (media_mtime, name) シーンが無いときの保険
+        for d in subdirs:
+            full = os.path.join(motion_folder, d)
+            if not os.path.isdir(full) or d == VIDEO_SUBDIR:
+                continue
+            smt = stage_latest_scene_mtime(full)
+            if smt is not None and (best is None or smt > best[0]):
+                best = (smt, d)
+            if smt is None:
+                m = pick_folder_media(full)
+                if m:
+                    mt = _media_mtime(m)
+                    if best_media is None or mt > best_media[0]:
+                        best_media = (mt, d)
+        if best:
+            return best[1]
+        return best_media[1] if best_media else ""
 
-    def _shot_stage_dirs(self, shot_folder):
+    def _shot_stage_dirs(self, shot_folder, subpath=None):
         """(工程名, フォルダ) のリスト。工程設定があれば設定、無ければ走査。
 
         複数ベース（ワイルドカード/複数サブパス）のときは工程名を「<親>/<工程>」に。
         """
+        sp = self._stage_subpath_for(subpath)
         if self._stages:
-            return [(st["name"], resolve_stage_dir(st, shot_folder, self._stage_subpath))
+            return [(st["name"], resolve_stage_dir(st, shot_folder, sp))
                     for st in self._stages]
-        bases = expand_stage_bases(shot_folder, self._stage_subpath)
+        bases = expand_stage_bases(shot_folder, sp)
         multi = len(bases) > 1
         out = []
         for base in bases:
