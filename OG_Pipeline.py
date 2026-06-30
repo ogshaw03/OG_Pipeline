@@ -4935,7 +4935,21 @@ class OGPipelineWindow(QWidget):
         cmds.file(rename=new_path)
         cmds.file(save=True, type=ftype)
         self.statusLabel.setText(f"✓  バージョンアップ保存: {Path(new_path).name}")
-        # 現在のルート配下なら一覧を更新して新バージョンを反映
+        # カラムをリセットせず、保存先まで展開して新バージョンを反映
+        self._reveal_saved(new_path)
+
+    def _reveal_saved(self, path):
+        """保存したファイルを、カラムをルートまでリセットせずに表示する。
+
+        reveal_path はルートから保存先までのカラムを構築して末尾を選択する
+        （= その場の表示と同じパスに収まる）。ルート外で到達できないときだけ
+        通常の一覧更新にフォールバックする。
+        """
+        try:
+            if self.browser.reveal_path(path):
+                return
+        except Exception:
+            pass
         self._apply_view()
 
     def _save_renamed(self, target_dir, new_stem, cmds):
@@ -5316,11 +5330,7 @@ class OGPipelineWindow(QWidget):
             QMessageBox.warning(self, "保存失敗", str(e))
             return
         self.statusLabel.setText(f"✓  保存しました: {name} → {target}")
-        self._apply_view()
-        try:
-            self.browser.reveal_path(save_path)
-        except Exception:
-            pass
+        self._reveal_saved(save_path)
 
     def _save_new_scene(self):
         """現在ブラウザでリーブ中のフォルダを既定にして、新規シーンを保存する。"""
@@ -5375,12 +5385,8 @@ class OGPipelineWindow(QWidget):
             QMessageBox.warning(self, "新規保存失敗", str(e))
             return
         self.statusLabel.setText(f"✓  新規シーンを保存しました: {Path(save_path).name}")
-        self._apply_view()   # 一覧に反映
-        # 保存したフォルダまでブラウザを展開
-        try:
-            self.browser.reveal_path(save_path)
-        except Exception:
-            pass
+        # カラムをリセットせず、保存先まで展開して反映
+        self._reveal_saved(save_path)
 
 
 # ─── cv2 起動処理（import 前に保留アンインストールを実行） ──────────────────────
