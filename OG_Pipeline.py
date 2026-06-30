@@ -1911,6 +1911,25 @@ class GridVideoCell(QWidget):
         super().mouseReleaseEvent(event)
 
 
+class ClickableRow(QWidget):
+    """クリックで on_click(payload) を呼ぶ行ウィジェット（リスト表示のショット行用）。"""
+
+    def __init__(self, on_click=None, payload=None, parent=None):
+        super().__init__(parent)
+        self._on_click = on_click
+        self._payload = payload
+        if on_click:
+            self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._on_click:
+            try:
+                self._on_click(self._payload)
+            except Exception:
+                pass
+        super().mousePressEvent(event)
+
+
 class AllShotsDialog(QDialog):
     """全ショットの最新動画をグリッドで一覧（工程バッジ・工程ソート）。
 
@@ -2189,7 +2208,8 @@ class AllShotsDialog(QDialog):
         self._scroll.setWidget(content)
 
     def _build_list_row(self, s, parent):
-        row = QWidget(parent)
+        # 行（ショット列）全体をクリックすると工程サイドバーを表示する
+        row = ClickableRow(self._select_shot, s["folder"], parent)
         row.setObjectName("gridCell")
         row.setAttribute(Qt.WA_StyledBackground, True)
         row.setAttribute(Qt.WA_Hover, True)
@@ -2209,8 +2229,8 @@ class AllShotsDialog(QDialog):
         h.addWidget(nameLab, 0, Qt.AlignVCenter)
 
         # 最新動画（プレビュータイル。ヘッダー無し）
-        cell = GridVideoCell(s["name"], s["media"], on_click=self._select_shot,
-                             payload=s["folder"], show_header=False, parent=row)
+        # タイル自身は選択トリガにしない（クリックは行へ伝播して行選択になる）
+        cell = GridVideoCell(s["name"], s["media"], show_header=False, parent=row)
         h.addWidget(cell, 0, Qt.AlignVCenter)
         self._cells.append(cell)
 
