@@ -4170,8 +4170,8 @@ class OGPipelineWindow(QWidget):
         # ハイライト（ホバー枠）が大きくならない・重ならないよう小さくする。
         self.exportContent = QWidget()
         ec = QVBoxLayout(self.exportContent)
-        ec.setContentsMargins(0, 0, 0, 0)
-        ec.setSpacing(8)
+        ec.setContentsMargins(2, 2, 2, 2)   # ホバー/フォーカス枠が端で切れないよう余白
+        ec.setSpacing(10)
 
         # 「保存時に自動書き出し」のトグルは環境設定に集約したため、ここには置かない。
 
@@ -4184,9 +4184,10 @@ class OGPipelineWindow(QWidget):
         mrow.addWidget(mlab)
         self.exportMethodCombo = QComboBox()
         self.exportMethodCombo.setMinimumWidth(180)
-        # 既定の QComboBox スタイル（min-height:28 / padding:4 8）に任せて
-        # テキストが切れないようにする。ポップアップ一覧だけ幅を確保。
+        # 枠（通常/ホバー/フォーカス）を全辺明示して、ハイライトが欠けないようにする。
         self.exportMethodCombo.setStyleSheet(
+            "QComboBox { border: 1px solid #2a3045; border-radius: 3px; padding: 4px 8px; }"
+            "QComboBox:hover, QComboBox:focus, QComboBox:on { border: 1px solid #e8a838; }"
             "QComboBox QAbstractItemView { min-width: 180px; }")
         self.exportMethodCombo.addItem("プレイブラスト", "playblast")
         self.exportMethodCombo.addItem("ハードウェア(裏)", "hardware")
