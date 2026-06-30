@@ -34,7 +34,7 @@ try:
         QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
         QListWidget, QListWidgetItem, QInputDialog, QMenu,
         QDialog, QDialogButtonBox, QGridLayout, QCheckBox, QSpinBox, QFormLayout,
-        QStackedWidget, QPlainTextEdit
+        QStackedWidget, QPlainTextEdit, QTableWidget, QTableWidgetItem, QHeaderView
     )
 except ImportError:
     try:
@@ -291,6 +291,82 @@ def shot_stage_scene_list(shot_folder, stage_subpath=""):
         pass
     out.sort(key=lambda s: _stage_rank(s[0]))
     return out
+
+
+# 命名規則トークン: 例 test_ep01_sh001_lay_pri_t01_v001 の _t01（テイク）/ _v001（ローカル）
+TAKE_RE = re.compile(r"(_t)(\d+)", re.I)
+LOCAL_RE = re.compile(r"(_v)(\d+)", re.I)
+
+
+def bump_version_token(stem, regex):
+    """stem 内の最後のトークン番号を +1（桁数維持）。戻り値: (新stem, 変更したか)。"""
+    matches = list(regex.finditer(stem))
+    if not matches:
+        return stem, False
+    m = matches[-1]
+    width = len(m.group(2))
+    n = int(m.group(2)) + 1
+    new = m.group(1) + str(n).zfill(width)
+    return stem[:m.start()] + new + stem[m.end():], True
+
+
+def set_version_token(stem, regex, value):
+    """stem 内の最後のトークンを value（例 't01' / 'v001'）に置換。戻り値: (新stem, 変更したか)。"""
+    if not value:
+        return stem, False
+    matches = list(regex.finditer(stem))
+    if not matches:
+        return stem, False
+    m = matches[-1]
+    return stem[:m.start()] + "_" + value + stem[m.end():], True
+
+
+def shot_folder_of(scene_path, shots_parent):
+    """scene_path の祖先のうち、shots_parent の直下にあるフォルダ（＝ショット）を返す。"""
+    if not scene_path or not shots_parent:
+        return None
+    sp = os.path.normcase(os.path.normpath(str(shots_parent)))
+    cur = os.path.normpath(os.path.dirname(str(scene_path)))
+    while True:
+        parent = os.path.dirname(cur)
+        if os.path.normcase(parent) == sp:
+            return cur
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def resolve_stage_dir(stage, shot_folder, stage_subpath=""):
+    """工程の保存先フォルダを解決する。
+
+    stage['folder'] が絶対パスならそれを、相対ならショットフォルダ起点で解決する。
+    folder 未設定なら <stage_container>/<工程名> にフォールバックする。
+    """
+    folder = (stage.get("folder") or "").strip()
+    if folder:
+        if os.path.isabs(folder):
+            return os.path.normpath(folder)
+        if shot_folder:
+            return os.path.normpath(os.path.join(
+                shot_folder, *folder.replace("\\", "/").split("/")))
+        return os.path.normpath(folder)
+    # フォールバック: 工程コンテナ直下の工程名フォルダ
+    if shot_folder:
+        return os.path.join(stage_container(shot_folder, stage_subpath), stage.get("name", ""))
+    return ""
+
+
+def apply_stage_rename(stem, stage):
+    """工程の置換規則・初期テイク/ローカルを stem に適用した新しい stem を返す。"""
+    new = stem
+    rf, rt = stage.get("rename_from", ""), stage.get("rename_to", "")
+    if rf and rt and rf in new:
+        new = new.replace(rf, rt)
+    if stage.get("take"):
+        new, _ = set_version_token(new, TAKE_RE, stage["take"])
+    if stage.get("local"):
+        new, _ = set_version_token(new, LOCAL_RE, stage["local"])
+    return new
 
 
 def open_file_external(path):
@@ -754,6 +830,39 @@ def _normalize_entries(data):
             # 各ショット内で工程フォルダが入っているサブパス（相対）。
             # 例: "ma" → <ショット>/ma/<工程>/ 。空＝ショット直下に工程フォルダ。
             "stage_subpath": str(e.get("stage_subpath", "")).strip().strip("/\\"),
+            # 工程リスト（任意）。設定があれば工程ベースの保存に使う。
+            "stages": _normalize_stages(e.get("stages")),
+        })
+    return out
+
+
+def _normalize_stages(data):
+    """工程リストを正規化する。
+
+    各要素: {name, folder, rename_from, rename_to, take, local}
+      - name        … 工程名（例: lay_pri）
+      - folder      … ショットフォルダからの相対パス（例: ma/lay_pri）。絶対パスも可。
+      - rename_from … Scene 名の置換元トークン（例: lay_pri）
+      - rename_to   … 置換先トークン（例: anm_sec）
+      - take        … テイクバージョン初期値（例: t01）
+      - local       … ローカルバージョン初期値（例: v001）
+    """
+    out = []
+    if not isinstance(data, list):
+        return out
+    for e in data:
+        if not isinstance(e, dict):
+            continue
+        name = str(e.get("name", "")).strip()
+        if not name:
+            continue
+        out.append({
+            "name": name,
+            "folder": str(e.get("folder", "")).strip(),
+            "rename_from": str(e.get("rename_from", "")).strip(),
+            "rename_to": str(e.get("rename_to", "")).strip() or name,
+            "take": str(e.get("take", "")).strip(),
+            "local": str(e.get("local", "")).strip(),
         })
     return out
 
@@ -775,12 +884,13 @@ def save_roots(roots):
         print("[OG_Pipeline] ルート保存エラー:", e)
 
 
-def add_root(name, path, shots_parent="", stage_subpath=""):
+def add_root(name, path, shots_parent="", stage_subpath="", stages=None):
     """ルートを追加（同名は上書き）し、名前順で保存する。"""
     roots = [r for r in load_roots() if r["name"] != name]
     roots.append({"name": name, "path": path,
                   "shots_parent": (shots_parent or path),
-                  "stage_subpath": (stage_subpath or "").strip().strip("/\\")})
+                  "stage_subpath": (stage_subpath or "").strip().strip("/\\"),
+                  "stages": _normalize_stages(stages or [])})
     roots.sort(key=lambda r: r["name"].lower())
     save_roots(roots)
     return roots
@@ -2815,11 +2925,13 @@ class ProjectSettingsDialog(QDialog):
         例: sh001/ma/<工程>/... のとき "ma"。空＝ショット直下に工程フォルダ。
     """
 
+    STAGE_COLS = ["工程名", "工程フォルダ", "リネーム元", "リネーム先", "テイク", "ローカル"]
+
     def __init__(self, parent=None, entry=None, current_startup=None):
         super().__init__(parent)
         self.setWindowTitle("プロジェクト設定")
         self.setStyleSheet(STYLE)
-        self.setMinimumWidth(620)
+        self.setMinimumSize(820, 600)
         entry = entry or {}
         self.imported = False   # ダイアログ内でインポートしたか（呼び出し側が再読込）
 
@@ -2867,6 +2979,38 @@ class ProjectSettingsDialog(QDialog):
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #4a5568; font-size: 10px;")
         outer.addWidget(hint)
+
+        # ── 工程リスト ──
+        stage_title = QLabel("◈  工程リスト（設定すると工程ベースの保存が有効になります）")
+        stage_title.setStyleSheet("font-size: 12px; color: #e8a838;")
+        outer.addWidget(stage_title)
+
+        self.stageTable = QTableWidget(0, len(self.STAGE_COLS))
+        self.stageTable.setHorizontalHeaderLabels(self.STAGE_COLS)
+        self.stageTable.verticalHeader().setVisible(False)
+        hdr = self.stageTable.horizontalHeader()
+        hdr.setSectionResizeMode(1, QHeaderView.Stretch)   # 工程フォルダ列を伸ばす
+        for c in (0, 2, 3, 4, 5):
+            hdr.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        for st in entry.get("stages", []) or []:
+            self._add_stage_row(st)
+        outer.addWidget(self.stageTable, 1)
+
+        srow = QHBoxLayout()
+        addStageBtn = QPushButton("＋ 工程を追加")
+        addStageBtn.setObjectName("refreshBtn")
+        addStageBtn.clicked.connect(lambda: self._add_stage_row())
+        delStageBtn = QPushButton("－ 選択行を削除")
+        delStageBtn.setObjectName("refreshBtn")
+        delStageBtn.clicked.connect(self._del_stage_row)
+        srow.addWidget(addStageBtn)
+        srow.addWidget(delStageBtn)
+        srow.addStretch(1)
+        shint = QLabel("例: lay_pri / 工程フォルダ=ma/lay_pri / リネーム元=lay_pri / "
+                       "リネーム先=lay_anm / テイク=t01 / ローカル=v001")
+        shint.setStyleSheet("color: #4a5568; font-size: 10px;")
+        srow.addWidget(shint)
+        outer.addLayout(srow)
 
         # インポート / エクスポート（プロジェクト設定 JSON の取り込み・書き出し）
         io_row = QHBoxLayout()
@@ -2978,6 +3122,36 @@ class ProjectSettingsDialog(QDialog):
             return ""           # ショットフォルダ自身 → 直下に工程
         return "/".join(parts[1:])
 
+    # ── 工程リストの行操作 ─────────────────────────────
+    def _add_stage_row(self, stage=None):
+        stage = stage or {}
+        r = self.stageTable.rowCount()
+        self.stageTable.insertRow(r)
+        vals = [stage.get("name", ""), stage.get("folder", ""),
+                stage.get("rename_from", ""), stage.get("rename_to", ""),
+                stage.get("take", ""), stage.get("local", "")]
+        for c, v in enumerate(vals):
+            self.stageTable.setItem(r, c, QTableWidgetItem(v))
+
+    def _del_stage_row(self):
+        rows = sorted({i.row() for i in self.stageTable.selectedIndexes()}, reverse=True)
+        for r in rows:
+            self.stageTable.removeRow(r)
+
+    def _stages_from_table(self):
+        out = []
+        for r in range(self.stageTable.rowCount()):
+            def cell(c):
+                it = self.stageTable.item(r, c)
+                return it.text().strip() if it else ""
+            name = cell(0)
+            if not name:
+                continue
+            out.append({"name": name, "folder": cell(1),
+                        "rename_from": cell(2), "rename_to": cell(3) or name,
+                        "take": cell(4), "local": cell(5)})
+        return out
+
     def _on_ok(self):
         if not self.nameEdit.text().strip() or not self.rootEdit.text().strip():
             QMessageBox.warning(self, "プロジェクト設定", "名前とプロジェクトルートは必須です。")
@@ -2990,6 +3164,7 @@ class ProjectSettingsDialog(QDialog):
             "path": self.rootEdit.text().strip(),
             "shots_parent": self.shotsEdit.text().strip() or self.rootEdit.text().strip(),
             "stage_subpath": self.stageEdit.text().strip().strip("/\\"),
+            "stages": self._stages_from_table(),
         }
 
 
@@ -3232,6 +3407,7 @@ class OGPipelineWindow(QWidget):
         self.active_root = None
         self.active_shots_parent = None
         self.active_stage_subpath = ""   # 各ショット内の工程フォルダ相対サブパス
+        self.active_stages = []          # 工程リスト（プロジェクト設定）
         self._last_export_at = {}    # {正規化シーンパス: 最終書き出し time.time()}
         self._save_job = None        # SceneSaved scriptJob の ID
         self._current_folder = None  # ブラウザでリーブ中のフォルダ（新規保存先候補）
@@ -3686,9 +3862,23 @@ class OGPipelineWindow(QWidget):
         # 名前末尾の番号を +1 してローカルバージョンを上げて保存
         self.versionUpBtn = QPushButton("⇧  VERSION UP")
         self.versionUpBtn.setObjectName("refreshBtn")
-        self.versionUpBtn.setToolTip("ファイル名末尾の番号を +1 して同じフォルダに保存")
+        self.versionUpBtn.setToolTip("ローカルバージョン（末尾番号 / v###）を +1 して同じフォルダに保存")
         self.versionUpBtn.clicked.connect(self._version_up_save)
         ab_layout.addWidget(self.versionUpBtn)
+
+        # テイクバージョンを +1 して保存（工程設定の命名規則 _t## を増やす）
+        self.takeUpBtn = QPushButton("⇧T  TAKE UP")
+        self.takeUpBtn.setObjectName("refreshBtn")
+        self.takeUpBtn.setToolTip("テイクバージョン（_t##）を +1 して同じフォルダに保存")
+        self.takeUpBtn.clicked.connect(self._take_up_save)
+        ab_layout.addWidget(self.takeUpBtn)
+
+        # 別工程として保存（工程設定に従いリネーム＋テイク/ローカルを初期値にリセット）
+        self.saveStageBtn = QPushButton("→  SAVE 別工程")
+        self.saveStageBtn.setObjectName("refreshBtn")
+        self.saveStageBtn.setToolTip("選択した工程のフォルダに、命名規則でリネームして保存（テイク/ローカルは初期値）")
+        self.saveStageBtn.clicked.connect(self._save_to_stage)
+        ab_layout.addWidget(self.saveStageBtn)
 
         # 現在リーブ（表示）中のフォルダに新規シーンを保存
         self.saveNewBtn = QPushButton("✚  SAVE NEW SCENE")
@@ -3801,6 +3991,7 @@ class OGPipelineWindow(QWidget):
             self.active_root = None
             self.active_shots_parent = None
             self.active_stage_subpath = ""
+            self.active_stages = []
             self.rootPathLabel.setText("▸  ルート未登録")
             self.browser.set_root(None)
             self.statusLabel.setText(
@@ -3811,6 +4002,7 @@ class OGPipelineWindow(QWidget):
         self.active_root = entry.get("path") or find_root_path(name)
         self.active_shots_parent = entry.get("shots_parent") or self.active_root
         self.active_stage_subpath = entry.get("stage_subpath", "") or ""
+        self.active_stages = entry.get("stages", []) or []
         self.rootPathLabel.setText(f"▸  {self.active_root}")
         self._apply_view()
 
@@ -3823,7 +4015,8 @@ class OGPipelineWindow(QWidget):
         accepted = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
         if accepted:
             v = dlg.values()
-            add_root(v["name"], v["path"], v["shots_parent"], v["stage_subpath"])
+            add_root(v["name"], v["path"], v["shots_parent"], v["stage_subpath"],
+                     v.get("stages"))
             # 「次回も使用」チェックを起動時設定に反映
             if dlg.use_startup():
                 set_startup_root(v["name"])
@@ -4420,6 +4613,107 @@ class OGPipelineWindow(QWidget):
         self.statusLabel.setText(f"✓  バージョンアップ保存: {Path(new_path).name}")
         # 現在のルート配下なら一覧を更新して新バージョンを反映
         self._apply_view()
+
+    def _save_renamed(self, target_dir, new_stem, cmds):
+        """new_stem を target_dir に保存する共通処理。拡張子は現在のシーンに合わせる。"""
+        cur = cmds.file(q=True, sceneName=True) or ""
+        ext = os.path.splitext(cur)[1].lower() if cur else ".ma"
+        if ext not in (".ma", ".mb"):
+            ext = ".ma"
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except Exception:
+            pass
+        save_path = os.path.join(target_dir, new_stem + ext)
+        if os.path.exists(save_path):
+            r = QMessageBox.question(
+                self, "上書き確認", "%s は既に存在します。上書きしますか？" % os.path.basename(save_path),
+                QMessageBox.Yes | QMessageBox.No)
+            if r != QMessageBox.Yes:
+                return None
+        ftype = "mayaAscii" if ext == ".ma" else "mayaBinary"
+        cmds.file(rename=save_path)
+        cmds.file(save=True, type=ftype)
+        self._apply_view()
+        try:
+            self.browser.reveal_path(save_path)
+        except Exception:
+            pass
+        return save_path
+
+    def _take_up_save(self):
+        """テイクバージョン（_t##）を +1 して同じフォルダに保存する。"""
+        try:
+            import maya.cmds as cmds
+        except ImportError:
+            QMessageBox.information(self, "TAKE UP",
+                                    "Maya 内で実行すると、テイク番号を +1 して保存します。")
+            return
+        cur = cmds.file(q=True, sceneName=True) or ""
+        if not cur:
+            QMessageBox.warning(self, "TAKE UP", "保存済みのシーンがありません。")
+            return
+        stem, ext = os.path.splitext(os.path.basename(cur))
+        new_stem, ok = bump_version_token(stem, TAKE_RE)
+        if not ok:
+            QMessageBox.warning(self, "TAKE UP",
+                                "テイク番号（_t##）が見つかりませんでした:\n" + os.path.basename(cur))
+            return
+        saved = self._save_renamed(os.path.dirname(cur), new_stem, cmds)
+        if saved:
+            self.statusLabel.setText(f"✓  テイクアップ保存: {Path(saved).name}")
+
+    def _save_to_stage(self):
+        """別工程として保存。工程設定があればリネーム＋テイク/ローカル初期化して工程フォルダへ。
+
+        工程設定（プロジェクト設定の工程リスト）が無い場合は SAVE AS にフォールバックする。
+        """
+        try:
+            import maya.cmds as cmds
+        except ImportError:
+            QMessageBox.information(self, "SAVE 別工程",
+                                    "Maya 内で実行すると、選択した工程フォルダにリネーム保存します。")
+            return
+        stages = getattr(self, "active_stages", []) or []
+        if not stages:
+            # 工程設定なし → 現状機能（SAVE AS）にフォールバック
+            self.statusLabel.setText("工程リストが未設定のため SAVE AS を使用します（プロジェクト設定で工程を登録できます）")
+            self._save_scene_as()
+            return
+        cur = cmds.file(q=True, sceneName=True) or ""
+        if not cur:
+            QMessageBox.warning(self, "SAVE 別工程", "保存済みのシーンがありません。")
+            return
+
+        # 対象工程を選ぶ（ブラウザ選択中フォルダに一致する工程を初期選択）
+        names = [s["name"] for s in stages]
+        default_idx = 0
+        cf = os.path.normcase(os.path.normpath(str(self._current_folder or "")))
+        shot_folder = shot_folder_of(cur, self.active_shots_parent)
+        for i, s in enumerate(stages):
+            d = resolve_stage_dir(s, shot_folder, self.active_stage_subpath)
+            if d and os.path.normcase(os.path.normpath(d)) == cf:
+                default_idx = i
+                break
+        choice, ok = QInputDialog.getItem(
+            self, "SAVE 別工程", "保存先の工程を選択:", names, default_idx, False)
+        if not ok or not choice:
+            return
+        stage = stages[names.index(choice)]
+
+        if not shot_folder:
+            QMessageBox.warning(
+                self, "SAVE 別工程",
+                "現在のシーンからショットフォルダを特定できませんでした。\n"
+                "（プロジェクト設定の『ショットフォルダの親』を確認してください）")
+            return
+        target_dir = resolve_stage_dir(stage, shot_folder, self.active_stage_subpath)
+        stem = os.path.splitext(os.path.basename(cur))[0]
+        new_stem = apply_stage_rename(stem, stage)
+        saved = self._save_renamed(target_dir, new_stem, cmds)
+        if saved:
+            self.statusLabel.setText(
+                f"✓  別工程保存 [{stage['name']}]: {Path(saved).name} → {target_dir}")
 
     def _playblast_current(self):
         """現在 Maya で開いているシーンを、手動プルダウンの方式で動画書き出しする。
