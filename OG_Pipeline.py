@@ -2090,39 +2090,52 @@ class AllShotsDialog(QDialog):
         outer.addWidget(self._foot)
 
         # ── ショットデータ収集 ──
-        # サブパスは「ショット親からの相対パス（ワイルドカード可）」。
-        # サブパスで辿り着いたフォルダ群（base）の『子フォルダ』が各タイル＝最新動画。
-        #   空欄     → base = ショット親 → 直下の各フォルダ（ショット）がタイル（従来）
-        #   "Boss_003" → base = ショット親/Boss_003 → そのキャラの各モーションがタイル
-        #   "*"      → base = 各直下フォルダ → それぞれの子（全キャラのモーション等）がタイル
         self._shot_data = []
-        sp_norm = os.path.normcase(os.path.normpath(shots_parent))
-        bases = expand_stage_bases(shots_parent, self._stage_subpath)
-        for base in bases:
-            parent_name = os.path.basename(base.rstrip("/\\"))
-            # ベースがショット親自身（＝サブパス未設定）のときは、バッジ（親名）を出さない。
-            # 出すとショット親フォルダ名が全タイルに付いて「サブパス設定時の状態」に見えるため。
-            is_top = os.path.normcase(os.path.normpath(base)) == sp_norm
+        has_subpath = bool((self._stage_subpath or "").strip())
+        if has_subpath:
+            # サブパス設定あり: 「ショット親からの相対パス（ワイルドカード可）」で辿った
+            # フォルダ群（base）の『子フォルダ』が各タイル＝最新動画。
+            #   "Boss_003" → そのキャラの各モーションがタイル（バッジ＝キャラ名）
+            #   "*"        → 各直下フォルダの子（全キャラのモーション等）がタイル
+            for base in expand_stage_bases(shots_parent, self._stage_subpath):
+                parent_name = os.path.basename(base.rstrip("/\\"))
+                try:
+                    children = sorted(os.listdir(base))
+                except Exception:
+                    children = []
+                for child in children:
+                    cdir = os.path.join(base, child)
+                    if not os.path.isdir(cdir) or child == VIDEO_SUBDIR:
+                        continue
+                    media = pick_folder_media(cdir)
+                    if media:
+                        self._shot_data.append(
+                            {"name": "%s / %s" % (parent_name, child), "folder": cdir,
+                             "media": media, "title": child, "badge": parent_name,
+                             "stage": child, "shot": parent_name})
+            note = "サブパス配下のフォルダ単位の最新動画"
+        else:
+            # サブパス未設定: 従来どおりショットごとに最新工程
+            # （工程設定があればそれ、無ければ工程フォルダ検出）の動画。バッジ＝工程名。
             try:
-                children = sorted(os.listdir(base))
+                names = sorted(os.listdir(shots_parent))
             except Exception:
-                children = []
-            for child in children:
-                cdir = os.path.join(base, child)
-                if not os.path.isdir(cdir) or child == VIDEO_SUBDIR:
+                names = []
+            for d in names:
+                full = os.path.join(shots_parent, d)
+                if not os.path.isdir(full):
                     continue
-                media = pick_folder_media(cdir)
-                if media:
-                    name = child if is_top else "%s / %s" % (parent_name, child)
+                stage_name, media = self._shot_latest(full)
+                if media or stage_name:
                     self._shot_data.append(
-                        {"name": name, "folder": cdir, "media": media,
-                         "title": child, "badge": ("" if is_top else parent_name),
-                         "stage": child, "shot": (parent_name if not is_top else child)})
+                        {"name": d, "folder": full, "media": media,
+                         "title": d, "badge": stage_name,
+                         "stage": stage_name, "shot": d})
+            note = "ショットごとの最新工程の動画"
 
-        nbase = len(bases)
+        nshots = len({s.get("shot") for s in self._shot_data})
         self._foot.setText(
-            f"{len(self._shot_data)} 件 / ベース {nbase}　"
-            "（サブパスで辿ったフォルダの子＝タイル／表示中のみ再生）")
+            f"{len(self._shot_data)} 件 / {nshots}　（{note}／表示中のみ再生）")
         self._rebuild()
 
     # ── 工程の解決（工程設定があれば優先） ─────────────────
