@@ -780,6 +780,22 @@ def set_auto_export_interval_min(minutes):
     _write_config(cfg)
 
 
+def get_manual_export_method():
+    """手動書き出しの方式（ムービーバーのプルダウン）。未設定なら自動更新の方式に従う。"""
+    m = _read_config().get("manual_export_method")
+    if m in EXPORT_METHODS:
+        return m
+    return get_export_method()
+
+
+def set_manual_export_method(method):
+    if method not in EXPORT_METHODS:
+        return
+    cfg = _read_config()
+    cfg["manual_export_method"] = method
+    _write_config(cfg)
+
+
 def reveal_in_explorer(path):
     """OS のファイラでパスを開く。ファイルなら選択状態で、フォルダならそのまま開く。
 
@@ -2855,6 +2871,13 @@ class OGPipelineWindow(QWidget):
         self.statusLabel.setText(
             "保存時の自動書き出しを %s にしました" % ("ON" if checked else "OFF"))
 
+    def _on_manual_method_changed(self, _idx):
+        method = self.exportMethodCombo.currentData() or "playblast"
+        set_manual_export_method(method)   # 選択を記憶（次回起動時も維持）
+        self.statusLabel.setText(
+            "手動書き出しの方式: %s"
+            % ("ハードウェア(裏)" if method == "hardware" else "プレイブラスト"))
+
     def _open_settings(self):
         dlg = SettingsDialog(self)
         if dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec():
@@ -3120,12 +3143,13 @@ class OGPipelineWindow(QWidget):
         self.exportMethodCombo.addItem("プレイブラスト", "playblast")
         self.exportMethodCombo.addItem("ハードウェア(裏)", "hardware")
         self.exportMethodCombo.setToolTip(
-            "手動書き出しの方式（環境設定の自動更新とは独立）\n"
+            "手動書き出しの方式（環境設定の自動更新とは独立。選択は記憶されます）\n"
             "プレイブラスト: 現在のビューを撮る（一瞬画面が止まる）\n"
             "ハードウェア(裏): 別プロセスでレンダー（手元を止めない／画面に出ない）")
-        idx = self.exportMethodCombo.findData(get_export_method())
+        idx = self.exportMethodCombo.findData(get_manual_export_method())
         if idx >= 0:
             self.exportMethodCombo.setCurrentIndex(idx)
+        self.exportMethodCombo.activated.connect(self._on_manual_method_changed)
         mb.addWidget(self.exportMethodCombo)
 
         # 現在シーンを Pipeline_Movie に書き出し（最小間隔は無視＝常に実行）
