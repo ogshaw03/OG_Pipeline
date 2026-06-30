@@ -1674,7 +1674,7 @@ class GridVideoCell(QWidget):
                 drillBtn.setToolTip("ブラウザでこの工程フォルダを開く")
                 drillBtn.clicked.connect(lambda _=False, f=folder: self._do_drill(f))
                 brow.addWidget(drillBtn, 1)
-            openBtn = QPushButton("📂 開く")
+            openBtn = QPushButton("▸ 開く")
             openBtn.setFixedHeight(17)
             openBtn.setStyleSheet(mini_btn)
             openBtn.setToolTip("エクスプローラーでフォルダを開く")
@@ -1733,7 +1733,7 @@ class GridVideoCell(QWidget):
 
     def _update_toggle_icon(self):
         try:
-            self._toggleBtn.setText("⏸" if self._playing else "▶")
+            self._toggleBtn.setText("■" if self._playing else "▶")
         except Exception:
             pass
 
@@ -2341,7 +2341,7 @@ class DetailPanel(QWidget):
         vlay.setContentsMargins(12, 10, 12, 6)
         vlay.addWidget(self.video)
         # フォルダを開く（選択中のシーン／フォルダをエクスプローラーで開く）
-        self.openFolderBtn = QPushButton("📂  フォルダを開く")
+        self.openFolderBtn = QPushButton("▸  フォルダを開く")
         self.openFolderBtn.setObjectName("refreshBtn")
         self.openFolderBtn.setToolTip("選択中のシーン／フォルダをエクスプローラーで開く")
         self.openFolderBtn.setEnabled(False)
@@ -2463,7 +2463,7 @@ class DetailPanel(QWidget):
                     sub_text = f"動画: {Path(media[1]).name}（外部再生）"
                     media_path = media[1]
 
-            title = QLabel(f"📁  {name}")
+            title = QLabel(f"▸  {name}")
             title.setObjectName("detailFilename")
             title.setWordWrap(True)
             self.contentLayout.addWidget(title)
@@ -2790,7 +2790,7 @@ class ColumnBrowser(QWidget):
         lw = self._make_column(title)
         dirs, files = self._list_dir(dir_path)
         for name in dirs:
-            it = QListWidgetItem(f"📁  {name}")
+            it = QListWidgetItem(f"▸  {name}")
             it.setData(Qt.UserRole, ("dir", str(Path(dir_path) / name)))
             it.setForeground(QColor("#cdb27a"))
             it.setToolTip(name)
@@ -3418,8 +3418,8 @@ class SettingsDialog(QDialog):
         self.nav = QListWidget()
         self.nav.setFixedWidth(170)
         self.nav.setObjectName("detailPanel")
-        self.nav.addItem("🎬  動画書き出し")
-        self.nav.addItem("🎞  mp4 有効化")
+        self.nav.addItem("▸  動画書き出し")
+        self.nav.addItem("▦  mp4 有効化")
         outer.addWidget(self.nav)
 
         # 右: セクション本体
@@ -3511,7 +3511,7 @@ class SettingsDialog(QDialog):
         self.cv2InstallBtn = QPushButton("⭳  インストール")
         self.cv2InstallBtn.setObjectName("refreshBtn")
         self.cv2InstallBtn.clicked.connect(self._do_install_cv2)
-        self.cv2UninstallBtn = QPushButton("🗑  アンインストール")
+        self.cv2UninstallBtn = QPushButton("✕  アンインストール")
         self.cv2UninstallBtn.setObjectName("refreshBtn")
         self.cv2UninstallBtn.clicked.connect(self._do_uninstall_cv2)
         row.addWidget(self.cv2InstallBtn)
@@ -3532,11 +3532,11 @@ class SettingsDialog(QDialog):
 
     def _refresh_cv2_status(self):
         if get_pending_cv2_uninstall():
-            self.cv2StatusLabel.setText("状態: ⏳ 次回 Maya 起動時にアンインストール予約済み")
+            self.cv2StatusLabel.setText("状態: ▸ 次回 Maya 起動時にアンインストール予約済み")
         elif _HAS_CV2:
-            self.cv2StatusLabel.setText("状態: ✅ 有効（mp4 を埋め込み再生できます）")
+            self.cv2StatusLabel.setText("状態: ✓ 有効（mp4 を埋め込み再生できます）")
         else:
-            self.cv2StatusLabel.setText("状態: ⚠ 無効（mp4 は外部プレイヤー／連番のみ）")
+            self.cv2StatusLabel.setText("状態: ▲ 無効（mp4 は外部プレイヤー／連番のみ）")
         self.cv2InstallBtn.setText("⟳  再インストール" if _HAS_CV2 else "⭳  インストール")
 
     def _do_install_cv2(self):
@@ -3573,7 +3573,7 @@ class SettingsDialog(QDialog):
             if r != QMessageBox.Yes:
                 return
             set_pending_cv2_uninstall(True)
-            self.cv2StatusLabel.setText("状態: ⏳ 次回 Maya 起動時にアンインストール予約済み")
+            self.cv2StatusLabel.setText("状態: ▸ 次回 Maya 起動時にアンインストール予約済み")
             self.cv2Log.setPlainText(
                 "次回 Maya 起動時に cv2 をアンインストールします。\n"
                 "（予約を取り消すには、もう一度この画面でインストールを実行してください）")
@@ -3724,11 +3724,11 @@ class OGPipelineWindow(QWidget):
         method = get_export_method()   # 自動更新は環境設定の方式に従う
         if method == "hardware":
             ok, msg, proc = export_hardware_background(cur)
-            self.statusLabel.setText(("🎬 自動: " if ok else "⚠ 自動: ") + msg)
+            self.statusLabel.setText(("▸ 自動: " if ok else "▲ 自動: ") + msg)
             if ok and proc is not None:
                 self._watch_hw_export(cur, proc, label="自動")
         else:
-            self.statusLabel.setText("🎬 自動プレイブラスト中…")
+            self.statusLabel.setText("▸ 自動プレイブラスト中…")
             self._playblast(cur)
 
     def _shot_number_of(self, scene_path):
@@ -3755,13 +3755,13 @@ class OGPipelineWindow(QWidget):
         except Exception:
             name = ""
         if name:
-            self.currentSceneLabel.setText("🎬  " + os.path.basename(name))
+            self.currentSceneLabel.setText("▸  " + os.path.basename(name))
             self.currentSceneLabel.setToolTip(name)
             shot = self._shot_number_of(name)
             self.currentShotLabel.setText(shot)
             self.currentShotLabel.setVisible(bool(shot))
         else:
-            self.currentSceneLabel.setText("🎬  (未保存のシーン)")
+            self.currentSceneLabel.setText("▸  (未保存のシーン)")
             self.currentSceneLabel.setToolTip("")
             self.currentShotLabel.setText("")
             self.currentShotLabel.setVisible(False)
@@ -3832,7 +3832,7 @@ class OGPipelineWindow(QWidget):
         layout.addWidget(self.currentShotLabel, 0, Qt.AlignVCenter)
         layout.addSpacing(12)   # ショットナンバーとシーン名の間に少し余白
 
-        self.currentSceneLabel = QLabel("🎬  (シーン未取得)")
+        self.currentSceneLabel = QLabel("▸  (シーン未取得)")
         self.currentSceneLabel.setStyleSheet(
             "color: #e8c87a; font-size: 13px; font-weight: bold;"
             " background: transparent; border: none;")
@@ -3866,7 +3866,7 @@ class OGPipelineWindow(QWidget):
 
         # プロジェクトの選択/登録/編集・インポート/エクスポート・次回も使用は
         # すべてこのダイアログに集約した。
-        self.addRootBtn = QPushButton("⚙  プロジェクト設定")
+        self.addRootBtn = QPushButton("◆  プロジェクト設定")
         self.addRootBtn.setObjectName("refreshBtn")
         self.addRootBtn.setToolTip("プロジェクトの登録/編集・インポート/エクスポート・起動時設定")
         self.addRootBtn.clicked.connect(self._add_root)
@@ -3877,14 +3877,14 @@ class OGPipelineWindow(QWidget):
         sep2.setStyleSheet("color: #1e2435;")
         layout.addWidget(sep2)
 
-        self.allShotsBtn = QPushButton("🎞  ショットリスト")
+        self.allShotsBtn = QPushButton("▦  ショットリスト")
         self.allShotsBtn.setObjectName("refreshBtn")
         self.allShotsBtn.setToolTip("全ショットの最新動画を一覧（グリッド／リスト）・自動再生")
         self.allShotsBtn.clicked.connect(self._open_all_shots)
         layout.addWidget(self.allShotsBtn)
 
         # cv2 が無い環境向け: mp4 埋め込み再生を有効化（cv2 を --user 導入）
-        self.enableMp4Btn = QPushButton("🎬  mp4再生を有効化")
+        self.enableMp4Btn = QPushButton("▸  mp4再生を有効化")
         self.enableMp4Btn.setObjectName("refreshBtn")
         self.enableMp4Btn.setToolTip("opencv-python を --user 導入して mp4 を埋め込み再生（共有 Maya は変更しません）")
         self.enableMp4Btn.clicked.connect(self._install_cv2)
@@ -3894,7 +3894,7 @@ class OGPipelineWindow(QWidget):
         layout.addStretch()
 
         # 右上: 環境設定（書き出し方式・保存時の自動更新など）
-        self.settingsBtn = QPushButton("🛠  環境設定")
+        self.settingsBtn = QPushButton("◆  環境設定")
         self.settingsBtn.setObjectName("refreshBtn")
         self.settingsBtn.setToolTip("書き出し方式・保存時の動画自動更新などを設定")
         self.settingsBtn.clicked.connect(self._open_settings)
@@ -4034,7 +4034,7 @@ class OGPipelineWindow(QWidget):
         else:
             QMessageBox.warning(self, "インストール失敗",
                                 "cv2 を導入できませんでした。ログ:\n\n" + (log or "")[-1500:])
-            self.statusLabel.setText("⚠  cv2 の導入に失敗しました")
+            self.statusLabel.setText("▲  cv2 の導入に失敗しました")
 
     def _build_toolbar(self) -> QWidget:
         toolbar = QWidget()
@@ -4166,7 +4166,7 @@ class OGPipelineWindow(QWidget):
 
         # プルダウン（折りたたみ）見出し。既定は閉じておき、誤操作を防ぐ。
         self.exportToggle = QToolButton()
-        self.exportToggle.setText("🎬  動画書き出し")
+        self.exportToggle.setText("▸  動画書き出し")
         self.exportToggle.setCheckable(True)
         self.exportToggle.setChecked(False)
         self.exportToggle.setArrowType(Qt.RightArrow)
@@ -4222,7 +4222,7 @@ class OGPipelineWindow(QWidget):
         ec.addLayout(mrow)
 
         # 現在シーンを Pipeline_Movie に書き出し（最小間隔は無視＝常に実行）
-        self.playblastBtn = QPushButton("🎬  書き出し実行")
+        self.playblastBtn = QPushButton("▸  書き出し実行")
         self.playblastBtn.setObjectName("refreshBtn")
         self.playblastBtn.setFixedHeight(30)
         self.playblastBtn.setStyleSheet(
@@ -4458,7 +4458,7 @@ class OGPipelineWindow(QWidget):
             self.statusLabel.setText(f"◎  現在のシーン: {Path(cur).name}")
         else:
             self.statusLabel.setText(
-                f"⚠  現在のシーンはこのルート配下にありません: {cur}"
+                f"▲  現在のシーンはこのルート配下にありません: {cur}"
             )
 
     # ════════════════════════════════════════════════════════════════════
@@ -4468,9 +4468,9 @@ class OGPipelineWindow(QWidget):
         menu = QMenu(self)
         act_open = menu.addAction("▶  シーンを開く")
         act_import = menu.addAction("▤  インポート")
-        act_folder = menu.addAction("📂  フォルダを開く")
+        act_folder = menu.addAction("▸  フォルダを開く")
         menu.addSeparator()
-        act_pb = menu.addAction("🎬  プレイブラスト書き出し")
+        act_pb = menu.addAction("▸  プレイブラスト書き出し")
         vid = find_scene_video(path)
         act_playvid = menu.addAction("▶  動画を再生") if vid else None
         act_ref = menu.addAction("⊟  リファレンスを編集…")
@@ -5025,7 +5025,7 @@ class OGPipelineWindow(QWidget):
         method = self.exportMethodCombo.currentData() or "playblast"
         if method == "hardware":
             ok, msg, proc = export_hardware_background(cur)
-            self.statusLabel.setText(("🎬  " if ok else "⚠  ") + msg)
+            self.statusLabel.setText(("▸  " if ok else "▲  ") + msg)
             if not ok:
                 QMessageBox.warning(self, "ハードウェア書き出し", msg)
             elif proc is not None:
@@ -5056,7 +5056,7 @@ class OGPipelineWindow(QWidget):
             tag = (label + " ") if label else ""
             if n > 0:
                 self.statusLabel.setText(
-                    "✅  %s動画書き出し完了: %s（連番 %d 枚）" % (tag, stem, n))
+                    "✓  %s動画書き出し完了: %s（連番 %d 枚）" % (tag, stem, n))
                 self.detailPanel.reload_video()
                 self._refresh_all_shots_if_open()
             else:
@@ -5071,7 +5071,7 @@ class OGPipelineWindow(QWidget):
                 except Exception:
                     pass
                 self.statusLabel.setText(
-                    "⚠  %s書き出し完了しましたがフレーム未生成（_oghw_log.txt 参照）%s"
+                    "▲  %s書き出し完了しましたがフレーム未生成（_oghw_log.txt 参照）%s"
                     % (tag, ("／" + detail) if detail else ""))
 
         timer.timeout.connect(_poll)
@@ -5124,7 +5124,7 @@ class OGPipelineWindow(QWidget):
                 shutil.rmtree(seq_dir, ignore_errors=True)   # 古いフレームを掃除
             os.makedirs(seq_dir, exist_ok=True)
         except Exception as e:
-            self.statusLabel.setText(f"⚠  出力フォルダ作成失敗: {e}")
+            self.statusLabel.setText(f"▲  出力フォルダ作成失敗: {e}")
             return
 
         # 空き容量チェック
@@ -5176,11 +5176,11 @@ class OGPipelineWindow(QWidget):
                 self, "プレイブラスト失敗",
                 "連番画像を書き出せませんでした:\n\n" + detail,
             )
-            self.statusLabel.setText("⚠  プレイブラスト失敗（詳細はダイアログ参照）")
+            self.statusLabel.setText("▲  プレイブラスト失敗（詳細はダイアログ参照）")
             return
 
         self.statusLabel.setText(
-            f"✅  動画書き出し完了: {Path(scene_path).stem}"
+            f"✓  動画書き出し完了: {Path(scene_path).stem}"
             f"（連番 {len(find_scene_sequence(scene_path))} 枚 → {seq_dir}）")
         self.detailPanel.reload_video()   # 選択中シーンならサイドバーで連番再生
         self._refresh_all_shots_if_open()
@@ -5191,10 +5191,10 @@ class OGPipelineWindow(QWidget):
             return
         if reveal_in_explorer(self._selected_path):
             self.statusLabel.setText(
-                f"📂  フォルダを開きました: {Path(self._selected_path).parent}"
+                f"▸  フォルダを開きました: {Path(self._selected_path).parent}"
             )
         else:
-            self.statusLabel.setText("⚠  フォルダを開けませんでした")
+            self.statusLabel.setText("▲  フォルダを開けませんでした")
 
     def _save_scene_as(self):
         """別名保存。ブラウザで別の工程フォルダを選択中なら、その選択中フォルダに保存する。
@@ -5268,7 +5268,7 @@ class OGPipelineWindow(QWidget):
             cmds.file(rename=save_path)
             cmds.file(save=True, type=ftype)
         except Exception as e:
-            self.statusLabel.setText("⚠  保存に失敗しました: %s" % e)
+            self.statusLabel.setText("▲  保存に失敗しました: %s" % e)
             QMessageBox.warning(self, "保存失敗", str(e))
             return
         self.statusLabel.setText(f"✓  保存しました: {name} → {target}")
@@ -5327,7 +5327,7 @@ class OGPipelineWindow(QWidget):
             cmds.file(rename=save_path)
             cmds.file(save=True, type=ftype)
         except Exception as e:
-            self.statusLabel.setText("⚠  新規保存に失敗しました: %s" % e)
+            self.statusLabel.setText("▲  新規保存に失敗しました: %s" % e)
             QMessageBox.warning(self, "新規保存失敗", str(e))
             return
         self.statusLabel.setText(f"✓  新規シーンを保存しました: {Path(save_path).name}")
