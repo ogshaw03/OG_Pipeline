@@ -5086,20 +5086,23 @@ class OGPipelineWindow(QWidget):
             else:
                 detail = ""
                 try:
-                    logp = os.path.join(os.path.dirname(scene_path), VIDEO_SUBDIR,
-                                        stem, "_oghw_log.txt")
                     if os.path.isfile(logp):
                         with open(logp, "r", encoding="utf-8", errors="replace") as fh:
-                            detail = fh.read().strip().splitlines()[-1:] or [""]
-                            detail = detail[0]
+                            lines = fh.read().strip().splitlines()
+                            detail = lines[-1] if lines else ""
                 except Exception:
                     pass
                 self.statusLabel.setText(
                     "▲  %s書き出し完了しましたがフレーム未生成（_oghw_log.txt 参照）%s"
                     % (tag, ("／" + detail) if detail else ""))
+            # タイマー起点の更新は操作待ちにならないよう即時再描画する
+            try:
+                self.statusLabel.repaint()
+            except Exception:
+                pass
 
         timer.timeout.connect(_poll)
-        timer.start(1000)
+        timer.start(700)
         self._hw_watchers.append(timer)
 
     def _refresh_all_shots_if_open(self):
