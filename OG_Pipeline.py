@@ -555,6 +555,28 @@ def _format_version_value(value, prefix, digits):
     return "%s%s" % (prefix, str(n).zfill(_clamp_digits(digits, len(str(n)))))
 
 
+def base_name_block_kinds(base_name, stage_marker, take_marker, local_marker):
+    """ベースネームを '_' で分割し、各ブロックの種別 (stage/take/local/static) を返す。
+    戻り値: [(block, kind), ...]。マーカー欄が空/ズレていても標準語を別名として拾う。"""
+    sm = (stage_marker or "").strip()
+    tm = (take_marker or "").strip()
+    lm = (local_marker or "").strip()
+    stage_words = {w for w in (sm, DEFAULT_STAGE_MARKER, "stage") if w}
+    take_words = {w for w in (tm, DEFAULT_TAKE_MARKER, "take", "テイク") if w}
+    local_words = {w for w in (lm, DEFAULT_LOCAL_MARKER, "ローカル", "local") if w}
+    out = []
+    for b in (base_name or "").split("_"):
+        if b in stage_words:
+            out.append((b, "stage"))
+        elif b in take_words:
+            out.append((b, "take"))
+        elif b in local_words:
+            out.append((b, "local"))
+        else:
+            out.append((b, "static"))
+    return out
+
+
 def apply_base_name(stem, base_name, stage, token_cfg=None,
                     take_marker=DEFAULT_TAKE_MARKER, local_marker=DEFAULT_LOCAL_MARKER,
                     stage_marker=DEFAULT_STAGE_MARKER):
@@ -585,17 +607,9 @@ def apply_base_name(stem, base_name, stage, token_cfg=None,
     base_segs = base_name.split("_")
     cur_segs = [s for s in (stem or "").split("_")]
 
-    # 各 base セグメントの種別を判定
-    kinds = []
-    for s in base_segs:
-        if stage_marker and s == stage_marker:
-            kinds.append("stage")
-        elif take_marker and s == take_marker:
-            kinds.append("take")
-        elif local_marker and s == local_marker:
-            kinds.append("local")
-        else:
-            kinds.append("static")
+    # 各 base ブロックの種別を判定（マーカー欄が空/ズレても標準語で拾えるよう別名も許容）
+    pairs = base_name_block_kinds(base_name, stage_marker, take_marker, local_marker)
+    kinds = [k for _, k in pairs]
 
     slot_idx = [i for i, k in enumerate(kinds) if k != "static"]
     if not slot_idx:
@@ -5759,17 +5773,32 @@ class OGPipelineWindow(QWidget):
         target_dir = resolve_stage_dir(stage, shot_folder, self.active_stage_subpath)
         stem = os.path.splitext(os.path.basename(cur))[0]
         cfg = getattr(self, "active_token_cfg", None) or self._default_token_cfg()
-        new_stem = apply_base_name(stem, cfg.get("base_name", ""), stage, cfg,
-                                   cfg.get("take_marker", DEFAULT_TAKE_MARKER),
-                                   cfg.get("local_marker", DEFAULT_LOCAL_MARKER),
-                                   cfg.get("stage_marker", DEFAULT_STAGE_MARKER))
-        if not new_stem:
+        base_name = (cfg.get("base_name", "") or "").strip()
+        stg_m = cfg.get("stage_marker", DEFAULT_STAGE_MARKER)
+        tk_m = cfg.get("take_marker", DEFAULT_TAKE_MARKER)
+        lc_m = cfg.get("local_marker", DEFAULT_LOCAL_MARKER)
+        if base_name:
+            new_stem = apply_base_name(stem, base_name, stage, cfg, tk_m, lc_m, stg_m)
+            if not new_stem:
+                # ベースネームは設定済みだがスロット語がベースネーム内に1つも無い
+                pairs = base_name_block_kinds(base_name, stg_m, tk_m, lc_m)
+                blocks = " _ ".join("[%s]" % b for b, _ in pairs)
+                QMessageBox.warning(
+                    self, "別工程へ保存（ベースネーム）",
+                    "ベースネーム内に工程/テイク/ローカルのスロット語が見つかりませんでした。\n\n"
+                    "ベースネーム: %s\n  ブロック: %s\n\n"
+                    "工程の語=「%s」 / テイクの語=「%s」 / ローカルの語=「%s」\n\n"
+                    "ベースネームの各ブロックと上の語が一致するようにしてください"
+                    "（例: ベースネームに『工程』があるなら〔工程 語〕も『工程』）。"
+                    % (base_name, blocks, stg_m, tk_m, lc_m))
+                return
+        else:
             # ベースネーム未設定 → 従来のトークン置換
             new_stem = apply_stage_rename(stem, stage, stages, cfg)
         saved = self._save_renamed(target_dir, new_stem, cmds)
         if saved:
             self.statusLabel.setText(
-                f"✓  別工程保存 [{stage['name']}]: {Path(saved).name} → {target_dir}")
+                f"✓  別工程保存 [{stage['name']}]: {stem} → {Path(saved).stem}（{target_dir}）")
 
     def _playblast_current(self):
         """現在 Maya で開いているシーンを、手動プルダウンの方式で動画書き出しする。
