@@ -872,6 +872,37 @@ def _cleanup_cv2_leftovers():
     return removed
 
 
+_MAYA_FPS_UNITS = {
+    "game": 15.0, "film": 24.0, "pal": 25.0, "ntsc": 30.0,
+    "show": 48.0, "palf": 50.0, "ntscf": 60.0,
+}
+
+
+def maya_scene_fps(default=24.0):
+    """現在開いている Maya シーンの再生 FPS を返す（取得不可なら default）。
+
+    時間単位は 'film'/'ntsc' 等の別名と '30fps'/'23.976fps' 等の数値表記の両方に対応。
+    """
+    try:
+        import maya.cmds as cmds
+        unit = cmds.currentUnit(q=True, time=True)
+    except Exception:
+        return default
+    if not unit:
+        return default
+    unit = str(unit).strip().lower()
+    if unit in _MAYA_FPS_UNITS:
+        return _MAYA_FPS_UNITS[unit]
+    m = re.match(r"^([\d.]+)\s*fps$", unit)
+    if m:
+        try:
+            v = float(m.group(1))
+            return v if v > 0 else default
+        except Exception:
+            return default
+    return default
+
+
 class Cv2VideoThread(QThread):
     """cv2 で mp4 をバックグラウンドデコードし、縮小済みフレームを QImage で通知する。
 
@@ -880,11 +911,12 @@ class Cv2VideoThread(QThread):
     """
     frameReady = Signal(object)   # QImage
 
-    def __init__(self, path, max_w=640, fps=None, parent=None):
+    def __init__(self, path, max_w=640, fps=None, fallback_fps=24.0, parent=None):
         super().__init__(parent)
         self._path = path
         self._max_w = int(max_w) if max_w else 0
-        self._fps = fps
+        self._fps = fps                       # 明示指定（あれば最優先）
+        self._fallback_fps = float(fallback_fps) if fallback_fps else 24.0
         self._running = True
 
     def run(self):
@@ -899,11 +931,14 @@ class Cv2VideoThread(QThread):
             except Exception:
                 pass
             return
-        src = cap.get(cv2.CAP_PROP_FPS) or 24.0
-        fps = self._fps or src
-        if not fps or fps <= 0 or fps > 60:
-            fps = 24.0
-        delay = max(10, int(1000.0 / fps))
+        # mp4 の埋め込み FPS（＝書き出し時のシーン FPS）を優先。欠落/無効なら
+        # シーン FPS のフォールバックを使う（24 固定にしない）。
+        src = cap.get(cv2.CAP_PROP_FPS)
+        fps = self._fps or (src if (src and src > 0) else self._fallback_fps)
+        if not fps or fps <= 0:
+            fps = self._fallback_fps
+        fps = min(float(fps), 120.0)
+        delay = max(8, int(1000.0 / fps))
         try:
             while self._running:
                 ok, frame = cap.read()
@@ -1600,12 +1635,13 @@ class VideoPlayer(QWidget):
             self._video_unavailable()
 
     # ── 連番画像（フリップブック） ─────────────────────────
-    def set_sequence(self, frames, fps=24):
+    def set_sequence(self, frames, fps=None):
         self._stop_all()
         self._path = None
         self._frames = list(frames or [])
         self._idx = 0
-        self._seq_fps = max(1, int(fps or 24))
+        # 連番は FPS メタを持たないので、指定が無ければシーン FPS で再生する。
+        self._seq_fps = max(1, int(fps if fps else maya_scene_fps()))
         self._openBtn.hide()
         if not self._frames:
             self.clear_player()
@@ -1615,7 +1651,7 @@ class VideoPlayer(QWidget):
         self._counter.show()
         self._show_frame(0)
         if len(self._frames) > 1:
-            self._timer.start(max(1, int(1000 / max(1, fps))))
+            self._timer.start(max(1, int(1000 / max(1, self._seq_fps))))
 
     def _show_frame(self, i):
         try:
@@ -1685,7 +1721,8 @@ class VideoPlayer(QWidget):
             self._openBtn.hide()
             self._placeholder.setText("動画を読み込み中…")
             self._placeholder.show()
-            self._cv_thread = Cv2VideoThread(path, max_w=640, parent=self)
+            self._cv_thread = Cv2VideoThread(path, max_w=640,
+                                             fallback_fps=maya_scene_fps(), parent=self)
             self._cv_thread.frameReady.connect(self._paint_image)
             self._cv_thread.start()
             token = self._video_token
@@ -1992,7 +2029,8 @@ class GridVideoCell(QWidget):
             if self._seq_timer is None:
                 self._seq_timer = QTimer(self)
                 self._seq_timer.timeout.connect(self._next_seq)
-            self._seq_timer.start(100)   # 約10fps
+            # 連番は FPS メタを持たないのでシーン FPS で再生する
+            self._seq_timer.start(max(8, int(1000.0 / max(1.0, maya_scene_fps()))))
             self._playing = True
         self._update_toggle_icon()
 
@@ -2045,7 +2083,8 @@ class GridVideoCell(QWidget):
     # cv2 動画（別スレッドでデコード）
     def _start_cv2(self, path):
         try:
-            self._cv_thread = Cv2VideoThread(path, max_w=self.CELL_W, parent=self)
+            self._cv_thread = Cv2VideoThread(path, max_w=self.CELL_W,
+                                             fallback_fps=maya_scene_fps(), parent=self)
             self._cv_thread.frameReady.connect(self._paint)
             self._cv_thread.start()
             return True
