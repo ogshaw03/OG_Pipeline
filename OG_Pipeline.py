@@ -1150,7 +1150,7 @@ def set_grid_cols(n):
 
 def get_list_rows():
     try:
-        return min(20, max(5, int(_read_config().get("allshots_list_rows", 8))))
+        return min(20, max(5, int(_read_config().get("allshots_list_rows", 10))))
     except Exception:
         return 8
 
@@ -2418,8 +2418,8 @@ class AllShotsDialog(QDialog):
         h.setContentsMargins(8, 6, 8, 6)
         h.setSpacing(10)
 
-        # ショット名
-        nameLab = QLabel(s["name"])
+        # 名前列（サブパス指定時はモーション名、未設定時はショット名）
+        nameLab = QLabel(s.get("title", s["name"]))
         nameLab.setFixedWidth(150)
         nameLab.setStyleSheet("color: #e8c87a; font-size: 14px; font-weight: bold;")
         nameLab.setWordWrap(True)
@@ -2427,23 +2427,30 @@ class AllShotsDialog(QDialog):
 
         # 最新動画（プレビュータイル。ヘッダー無し）
         # タイル自身は選択トリガにしない（クリックは行へ伝播して行選択になる）
-        cell = GridVideoCell(s["name"], s["media"], show_header=False,
+        cell = GridVideoCell(s.get("title", s["name"]), s["media"], show_header=False,
                              cell_w=tw, cell_h=th, parent=row)
         h.addWidget(cell, 0, Qt.AlignVCenter)
         self._cells.append(cell)
 
-        # 工程バッジ（シーンファイルがある工程＝明るい / 無い工程＝暗い）
+        # バッジ列
         badges = QWidget()
         bl = QHBoxLayout(badges)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(5)
-        stages = self._stage_scene_list(s["folder"])
-        if not stages:
-            empty = QLabel("—")
-            empty.setStyleSheet("color: #3a4055; font-size: 11px;")
-            bl.addWidget(empty)
-        for stage_name, _sf, has_scene in stages:
-            bl.addWidget(self._stage_badge(stage_name, has_scene))
+        if (self._stage_subpath or "").strip():
+            # サブパス指定時: 親（キャラ）名をバッジ表示（グリッドと同じ）
+            badge = s.get("badge", "")
+            if badge:
+                bl.addWidget(self._stage_badge(badge, True))
+        else:
+            # 未設定時: 工程ごとのシーン有無バッジ（あり＝明るい/なし＝暗い）
+            stages = self._stage_scene_list(s["folder"])
+            if not stages:
+                empty = QLabel("—")
+                empty.setStyleSheet("color: #3a4055; font-size: 11px;")
+                bl.addWidget(empty)
+            for stage_name, _sf, has_scene in stages:
+                bl.addWidget(self._stage_badge(stage_name, has_scene))
         bl.addStretch(1)
         h.addWidget(badges, 1, Qt.AlignVCenter)
         return row
