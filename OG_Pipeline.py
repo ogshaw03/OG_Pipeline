@@ -4616,51 +4616,86 @@ class OGPipelineWindow(QWidget):
             self.statusLabel.setText("⚠  フォルダを開けませんでした")
 
     def _save_scene_as(self):
-        """現在開いているシーンを、そのシーンのフォルダを既定にして別名保存する。
+        """別名保存。ブラウザで別の工程フォルダを選択中なら、その選択中フォルダに保存する。
 
-        Maya のホットキー／プロジェクトは変更しない。ツール内の保存ダイアログだけ、
-        開いているシーンのフォルダを開始位置にする（Ctrl+Shift+S のツール版）。
+        ファイル名は現在のシーン名を初期値として引き継ぎ、手入力で変更できる。
+        Maya のホットキー／プロジェクトは変更しない。
         """
         try:
             import maya.cmds as cmds
         except ImportError:
             QMessageBox.information(
                 self, "SAVE AS（スタンドアロンモード）",
-                "Maya 内で実行すると、現在のシーンのフォルダを既定にした\n"
-                "保存ダイアログ（fileDialog2）を表示します。",
+                "Maya 内で実行すると、ブラウザで選択中のフォルダに、\n"
+                "現在のシーン名を初期値とした別名保存ダイアログを表示します。",
                 QMessageBox.Ok,
             )
             return
 
-        # 開始フォルダの優先順位:
-        #   1) 現在開いているシーンのフォルダ
-        #   2) ツールで最後に選択したファイルのフォルダ
-        #   3) 現在のワークスペース
-        cur = cmds.file(q=True, sceneName=True)
-        start = ""
-        if cur:
-            start = os.path.dirname(cur)
-        elif self._selected_path:
-            start = os.path.dirname(self._selected_path)
-        if not start:
-            try:
-                start = cmds.workspace(q=True, dir=True)
-            except Exception:
-                start = ""
+        cur = cmds.file(q=True, sceneName=True) or ""
 
-        res = cmds.fileDialog2(
-            fileMode=0,                      # 保存（存在しないファイル名も可）
-            caption="Save Scene As",
-            startingDirectory=start,
-            fileFilter="Maya ASCII (*.ma);;Maya Binary (*.mb)",
-        )
-        if not res:
+        # 保存先フォルダの優先順位:
+        #   1) ブラウザで選択中（リーブ中）のフォルダ ＝ 別工程を選んでいればそこ
+        #   2) 現在開いているシーンのフォルダ
+        #   3) 最後に選択したファイルのフォルダ / ワークスペース
+        target = ""
+        if self._current_folder and os.path.isdir(str(self._current_folder)):
+            target = str(self._current_folder)
+        if not target and cur:
+            target = os.path.dirname(cur)
+        if not target and self._selected_path:
+            target = os.path.dirname(self._selected_path)
+        if not target:
+            try:
+                target = cmds.workspace(q=True, dir=True)
+            except Exception:
+                target = ""
+        if not target or not os.path.isdir(target):
+            self.statusLabel.setText("保存先フォルダが未確定です（ブラウザでフォルダを選択してください）")
             return
-        save_path = res[0]
-        ftype = "mayaAscii" if save_path.lower().endswith(".ma") else "mayaBinary"
-        cmds.file(rename=save_path)
-        cmds.file(save=True, type=ftype)
-        self.statusLabel.setText(f"✓  保存しました: {Path(save_path).name}")
+
+        # 既定ファイル名 ＝ 現在のシーン名（拡張子込み）。手入力で変更可。
+        default_name = os.path.basename(cur) if cur else "untitled.ma"
+        name, ok = QInputDialog.getText(
+            self, "SAVE AS",
+            "保存先: %s\nファイル名:" % target, text=default_name)
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        # 拡張子の補完（無ければ現在のシーンの拡張子、既定 .ma）
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in (".ma", ".mb"):
+            cur_ext = os.path.splitext(cur)[1].lower() if cur else ".ma"
+            if cur_ext not in (".ma", ".mb"):
+                cur_ext = ".ma"
+            name += cur_ext
+            ext = cur_ext
+
+        save_path = os.path.join(target, name)
+        if os.path.exists(save_path):
+            r = QMessageBox.question(
+                self, "上書き確認",
+                "%s は既に存在します。上書きしますか？" % name,
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if r != QMessageBox.Yes:
+                return
+
+        ftype = "mayaAscii" if ext == ".ma" else "mayaBinary"
+        try:
+            cmds.file(rename=save_path)
+            cmds.file(save=True, type=ftype)
+        except Exception as e:
+            self.statusLabel.setText("⚠  保存に失敗しました: %s" % e)
+            QMessageBox.warning(self, "保存失敗", str(e))
+            return
+        self.statusLabel.setText(f"✓  保存しました: {name} → {target}")
+        self._apply_view()
+        try:
+            self.browser.reveal_path(save_path)
+        except Exception:
+            pass
 
     def _save_new_scene(self):
         """現在ブラウザでリーブ中のフォルダを既定にして、新規シーンを保存する。"""
