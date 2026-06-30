@@ -218,16 +218,25 @@ def _media_mtime(media):
         return 0.0
 
 
-def shot_stage_list(shot_folder):
-    """ショット直下の各工程フォルダ（lay, anm 等）の最新メディアを返す。
+def stage_container(shot_folder, stage_subpath=""):
+    """工程フォルダが入っている実フォルダ。stage_subpath があればその相対パス下。"""
+    if stage_subpath:
+        return os.path.join(shot_folder, *stage_subpath.replace("\\", "/").split("/"))
+    return shot_folder
+
+
+def shot_stage_list(shot_folder, stage_subpath=""):
+    """ショットの各工程フォルダ（lay, anm 等）の最新メディアを返す。
 
     戻り値: [(stage_name, media, mtime), ...]（mtime 昇順）。
-    工程フォルダ＝ショット直下のサブフォルダ（Pipeline_Movie は除外）。
+    工程フォルダ＝ <ショット>/<stage_subpath>/ 直下のサブフォルダ（Pipeline_Movie は除外）。
+    stage_subpath が空ならショット直下を見る。
     """
     out = []
+    base = stage_container(shot_folder, stage_subpath)
     try:
-        for d in sorted(os.listdir(shot_folder)):
-            full = os.path.join(shot_folder, d)
+        for d in sorted(os.listdir(base)):
+            full = os.path.join(base, d)
             if not os.path.isdir(full) or d == VIDEO_SUBDIR:
                 continue
             media = pick_folder_media(full)
@@ -606,7 +615,7 @@ def _config_path():
 
 
 def _normalize_entries(data):
-    """任意の入力を [{'name','path','shots_parent'}, ...] に正規化する。"""
+    """任意の入力を [{'name','path','shots_parent','stage_subpath'}, ...] に正規化する。"""
     if isinstance(data, dict) and "roots" in data:
         data = data["roots"]
     elif isinstance(data, dict) and "path" in data:
@@ -627,6 +636,9 @@ def _normalize_entries(data):
             "path": path,
             # ショットフォルダの親階層（直下のフォルダ＝ショット）。未設定なら root 自身。
             "shots_parent": str(e.get("shots_parent", "")).strip() or path,
+            # 各ショット内で工程フォルダが入っているサブパス（相対）。
+            # 例: "ma" → <ショット>/ma/<工程>/ 。空＝ショット直下に工程フォルダ。
+            "stage_subpath": str(e.get("stage_subpath", "")).strip().strip("/\\"),
         })
     return out
 
@@ -648,11 +660,12 @@ def save_roots(roots):
         print("[OG_Pipeline] ルート保存エラー:", e)
 
 
-def add_root(name, path, shots_parent=""):
+def add_root(name, path, shots_parent="", stage_subpath=""):
     """ルートを追加（同名は上書き）し、名前順で保存する。"""
     roots = [r for r in load_roots() if r["name"] != name]
     roots.append({"name": name, "path": path,
-                  "shots_parent": (shots_parent or path)})
+                  "shots_parent": (shots_parent or path),
+                  "stage_subpath": (stage_subpath or "").strip().strip("/\\")})
     roots.sort(key=lambda r: r["name"].lower())
     save_roots(roots)
     return roots
@@ -1605,8 +1618,9 @@ class AllShotsDialog(QDialog):
     """
     COLS = 5
 
-    def __init__(self, shots_parent, parent=None):
+    def __init__(self, shots_parent, parent=None, stage_subpath=""):
         super().__init__(parent)
+        self._stage_subpath = stage_subpath or ""
         self.setWindowFlags(Qt.Window)
         self.setWindowTitle("All Shots — 最新動画一覧")
         self.setMinimumSize(1200, 640)
@@ -1690,13 +1704,14 @@ class AllShotsDialog(QDialog):
             full = os.path.join(shots_parent, d)
             if not os.path.isdir(full):
                 continue
-            stages = shot_stage_list(full)
+            stages = shot_stage_list(full, self._stage_subpath)
             if stages:
                 stage_name, media, _mt = stages[-1]   # 最新工程
             else:
                 media, stage_name = pick_folder_media(full), ""
             if media:
-                stage_folder = os.path.join(full, stage_name) if stage_name else full
+                base = stage_container(full, self._stage_subpath)
+                stage_folder = os.path.join(base, stage_name) if stage_name else full
                 self._shot_data.append(
                     {"name": d, "folder": full, "media": media,
                      "stage": stage_name, "stage_folder": stage_folder})
@@ -1755,12 +1770,13 @@ class AllShotsDialog(QDialog):
             if it.widget():
                 it.widget().deleteLater()
         self._sideTitle.setText(f"◈  {Path(folder).name} — 工程別")
-        stages = shot_stage_list(folder)
+        stages = shot_stage_list(folder, self._stage_subpath)
+        base = stage_container(folder, self._stage_subpath)
         if not stages:
             self._side_layout.addWidget(QLabel("工程フォルダに動画が見つかりません"))
         for stage_name, media, _mt in reversed(stages):   # 新しい工程を上に
             cell = GridVideoCell(stage_name, media, title_color=stage_color(stage_name),
-                                 folder=os.path.join(folder, stage_name),
+                                 folder=os.path.join(base, stage_name),
                                  on_drill=self._drill_to, parent=self._side_content)
             self._side_layout.addWidget(cell)
             self._side_cells.append(cell)
@@ -2526,6 +2542,143 @@ class ReferenceEditDialog(QDialog):
         return sum(1 for r in self._rows if r["remove"].isChecked())
 
 
+# ─── プロジェクト設定ダイアログ ───────────────────────────────────────────────
+class ProjectSettingsDialog(QDialog):
+    """プロジェクト（ルート）の登録/編集。
+
+    指定項目:
+      - 名前
+      - プロジェクトルート（path）
+      - ショットフォルダの親（shots_parent。直下のフォルダ＝ショット）
+      - 工程フォルダのサブパス（stage_subpath。各ショット内の相対パス）
+        例: sh001/ma/<工程>/... のとき "ma"。空＝ショット直下に工程フォルダ。
+    """
+
+    def __init__(self, parent=None, entry=None):
+        super().__init__(parent)
+        self.setWindowTitle("プロジェクト設定")
+        self.setStyleSheet(STYLE)
+        self.setMinimumWidth(620)
+        entry = entry or {}
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setSpacing(12)
+
+        title = QLabel("◈  プロジェクト設定")
+        title.setStyleSheet("font-size: 14px; color: #e8a838; letter-spacing: 1px;")
+        outer.addWidget(title)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        self.nameEdit = QLineEdit(entry.get("name", ""))
+        self.nameEdit.setPlaceholderText("プロジェクト名（プルダウンに表示）")
+        form.addRow("名前:", self.nameEdit)
+
+        self.rootEdit = QLineEdit(entry.get("path", ""))
+        form.addRow("プロジェクトルート:", self._with_browse(self.rootEdit, self._browse_root))
+
+        self.shotsEdit = QLineEdit(entry.get("shots_parent", ""))
+        self.shotsEdit.setPlaceholderText("この直下のフォルダをショットとして扱う（空＝ルート）")
+        form.addRow("ショットフォルダの親:",
+                    self._with_browse(self.shotsEdit, self._browse_shots))
+
+        self.stageEdit = QLineEdit(entry.get("stage_subpath", ""))
+        self.stageEdit.setPlaceholderText("各ショット内の相対パス。例: ma （空＝ショット直下）")
+        form.addRow("工程フォルダのサブパス:",
+                    self._with_browse(self.stageEdit, self._browse_stage, "例から取得…"))
+
+        outer.addLayout(form)
+
+        hint = QLabel(
+            "工程フォルダがショット直下に無い場合（例: sh001/ma/lay_anm/Scenedata/…）、"
+            "「例から取得…」で任意の1ショットの工程フォルダが入っているフォルダ"
+            "（例: sh001/ma）を選ぶと、相対サブパス（ma）を自動入力します。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #4a5568; font-size: 10px;")
+        outer.addWidget(hint)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._on_ok)
+        btns.rejected.connect(self.reject)
+        outer.addWidget(btns)
+
+    def _with_browse(self, edit, slot, label="参照…"):
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        h.addWidget(edit, 1)
+        b = QPushButton(label)
+        b.setObjectName("refreshBtn")
+        b.clicked.connect(slot)
+        h.addWidget(b)
+        return w
+
+    def _browse_root(self):
+        d = QFileDialog.getExistingDirectory(self, "プロジェクトルートを選択",
+                                             self.rootEdit.text() or str(Path.home()))
+        if d:
+            self.rootEdit.setText(d)
+            if not self.nameEdit.text().strip():
+                self.nameEdit.setText(Path(d).name)
+            if not self.shotsEdit.text().strip():
+                self.shotsEdit.setText(d)
+
+    def _browse_shots(self):
+        start = self.shotsEdit.text() or self.rootEdit.text() or str(Path.home())
+        d = QFileDialog.getExistingDirectory(
+            self, "ショットフォルダの親階層を選択（直下＝ショット）", start)
+        if d:
+            self.shotsEdit.setText(d)
+
+    def _browse_stage(self):
+        """例として1ショット内の『工程フォルダが入っているフォルダ』を選び、相対サブパスを算出。"""
+        sp = self.shotsEdit.text().strip() or self.rootEdit.text().strip()
+        start = sp or str(Path.home())
+        d = QFileDialog.getExistingDirectory(
+            self, "工程フォルダが入っているフォルダを選択（例: sh001/ma）", start)
+        if not d:
+            return
+        sub = self._derive_subpath(d, sp)
+        self.stageEdit.setText(sub)
+
+    @staticmethod
+    def _derive_subpath(picked, shots_parent):
+        """選んだフォルダから、ショットフォルダ起点の相対サブパスを求める。
+
+        shots_parent/<shot>/<sub...> を選んだとき <sub...> を返す。
+        ショットフォルダ自身を選んだら空。算出不能なら空。
+        """
+        if not shots_parent:
+            return ""
+        try:
+            rel = os.path.relpath(os.path.normpath(picked), os.path.normpath(shots_parent))
+        except Exception:
+            return ""
+        if rel.startswith("..") or rel == ".":
+            return ""
+        parts = [p for p in rel.replace("\\", "/").split("/") if p]
+        if len(parts) <= 1:
+            return ""           # ショットフォルダ自身 → 直下に工程
+        return "/".join(parts[1:])
+
+    def _on_ok(self):
+        if not self.nameEdit.text().strip() or not self.rootEdit.text().strip():
+            QMessageBox.warning(self, "プロジェクト設定", "名前とプロジェクトルートは必須です。")
+            return
+        self.accept()
+
+    def values(self):
+        return {
+            "name": self.nameEdit.text().strip(),
+            "path": self.rootEdit.text().strip(),
+            "shots_parent": self.shotsEdit.text().strip() or self.rootEdit.text().strip(),
+            "stage_subpath": self.stageEdit.text().strip().strip("/\\"),
+        }
+
+
 # ─── 環境設定ダイアログ ───────────────────────────────────────────────────────
 class SettingsDialog(QDialog):
     """書き出し方式・保存時の自動更新・自動更新の最小間隔を設定する。"""
@@ -2611,6 +2764,7 @@ class OGPipelineWindow(QWidget):
         self._loading_combo = False
         self.active_root = None
         self.active_shots_parent = None
+        self.active_stage_subpath = ""   # 各ショット内の工程フォルダ相対サブパス
         self._last_export_at = {}    # {正規化シーンパス: 最終書き出し time.time()}
         self._save_job = None        # SceneSaved scriptJob の ID
         self._current_folder = None  # ブラウザでリーブ中のフォルダ（新規保存先候補）
@@ -2909,7 +3063,9 @@ class OGPipelineWindow(QWidget):
                 old.deleteLater()
             except Exception:
                 pass
-        self._all_shots_dlg = AllShotsDialog(self.active_shots_parent, self)
+        self._all_shots_dlg = AllShotsDialog(
+            self.active_shots_parent, self,
+            stage_subpath=getattr(self, "active_stage_subpath", ""))
         self._all_shots_dlg.show()
         self._all_shots_dlg.raise_()
 
@@ -3198,6 +3354,7 @@ class OGPipelineWindow(QWidget):
         if not name:
             self.active_root = None
             self.active_shots_parent = None
+            self.active_stage_subpath = ""
             self.rootPathLabel.setText("▸  ルート未登録")
             self.browser.set_root(None)
             self.statusLabel.setText(
@@ -3207,39 +3364,27 @@ class OGPipelineWindow(QWidget):
         entry = find_root_entry(name) or {}
         self.active_root = entry.get("path") or find_root_path(name)
         self.active_shots_parent = entry.get("shots_parent") or self.active_root
+        self.active_stage_subpath = entry.get("stage_subpath", "") or ""
         self.rootPathLabel.setText(f"▸  {self.active_root}")
         self._apply_view()
 
     def _add_root(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "プロジェクトルートを選択", str(Path.home())
-        )
-        if not folder:
+        # 選択中のプロジェクトがあれば編集用に初期値として読み込む
+        cur_entry = None
+        cur_name = self._current_root_name()
+        if cur_name:
+            cur_entry = find_root_entry(cur_name)
+        dlg = ProjectSettingsDialog(self, entry=cur_entry)
+        if not (dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()):
             return
-        default_name = Path(folder).name or folder
-        name, ok = QInputDialog.getText(
-            self, "プロジェクト名", "このルートの名前:", text=default_name
-        )
-        if not ok or not name.strip():
-            return
-        name = name.strip()
-
-        # ショットフォルダの「親」階層を指定（その直下のフォルダ＝ショットと判別）。
-        # キャンセル時はルート自身を親とする（root 直下がショット）。
-        QMessageBox.information(
-            self, "ショットフォルダの親を選択",
-            "次に『ショットフォルダの一つ上の階層』を選んでください。\n"
-            "そのフォルダの直下にあるフォルダをショットとして扱います。\n"
-            "（ルート直下がショットならルートを選択 / キャンセルでルート）",
-        )
-        shots_parent = QFileDialog.getExistingDirectory(
-            self, "ショットフォルダの親階層を選択（直下＝ショット）", folder
-        ) or folder
-
-        add_root(name, folder, shots_parent)
-        self._reload_roots_combo(select_name=name)
+        v = dlg.values()
+        add_root(v["name"], v["path"], v["shots_parent"], v["stage_subpath"])
+        self._reload_roots_combo(select_name=v["name"])
+        self._select_in_combo(v["name"])
         self._apply_root()
-        self.statusLabel.setText(f"✓  ルートを追加: {name}（ショット親: {shots_parent}）")
+        sub = v["stage_subpath"] or "（ショット直下）"
+        self.statusLabel.setText(
+            f"✓  プロジェクト保存: {v['name']}（ショット親: {v['shots_parent']} ／ 工程サブパス: {sub}）")
 
     # ── フォルダ選択（配下の最新動画を表示） ───────────────
     def _is_shot_folder(self, folder):
