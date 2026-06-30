@@ -2099,15 +2099,30 @@ class AllShotsDialog(QDialog):
             full = os.path.join(shots_parent, d)
             if not os.path.isdir(full):
                 continue
-            # 最新工程は「シーンデータがある工程」を優先して決める
-            stage_name, media = self._shot_latest(full)
-            if media or stage_name:
-                self._shot_data.append(
-                    {"name": d, "folder": full, "media": media, "stage": stage_name})
+            # サブパスの一つ下（例: モーション）ごとに 1 タイル＝そのフォルダの最新動画。
+            units = self._shot_stage_dirs(full)
+            added = False
+            for label, udir in units:
+                if not udir or not os.path.isdir(udir):
+                    continue
+                media = pick_folder_media(udir)
+                if media:
+                    self._shot_data.append(
+                        {"name": "%s / %s" % (d, label), "folder": udir,
+                         "media": media, "stage": label, "shot": d})
+                    added = True
+            # 一つ下に該当が無いショットは、ショット自体の最新でフォールバック
+            if not added:
+                stage_name, media = self._shot_latest(full)
+                if media:
+                    self._shot_data.append(
+                        {"name": d, "folder": full, "media": media,
+                         "stage": stage_name, "shot": d})
 
+        nshots = len({s.get("shot") for s in self._shot_data})
         self._foot.setText(
-            f"{len(self._shot_data)} / {len(names)} ショット　"
-            "（最新＝シーンがある工程／表示中のみ再生／タイル選択で工程別を表示）")
+            f"{len(self._shot_data)} 件 / {nshots} ショット　"
+            "（サブパスの一つ下＝モーション単位の最新動画／表示中のみ再生）")
         self._rebuild()
 
     # ── 工程の解決（工程設定があれば優先） ─────────────────
@@ -2254,7 +2269,8 @@ class AllShotsDialog(QDialog):
         grid.setSpacing(10)
         r = c = 0
         for s in self._sorted_shot_data():
-            cell = GridVideoCell(s["name"], s["media"], stage=s["stage"],
+            # タイトル＝ショット/キャラ名、バッジ＝モーション（サブパス一つ下）名
+            cell = GridVideoCell(s.get("shot", s["name"]), s["media"], stage=s["stage"],
                                  on_click=self._select_shot, payload=s["folder"],
                                  folder=None, on_drill=None, parent=content)
             grid.addWidget(cell, r, c, Qt.AlignLeft | Qt.AlignTop)
