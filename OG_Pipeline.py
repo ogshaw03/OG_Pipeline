@@ -3901,11 +3901,6 @@ class OGPipelineWindow(QWidget):
         layout.addWidget(self.settingsBtn)
         return bar
 
-    def _on_auto_export_toggled(self, checked):
-        set_auto_export_on_save(checked)
-        self.statusLabel.setText(
-            "保存時の自動書き出しを %s にしました" % ("ON" if checked else "OFF"))
-
     def _on_manual_method_changed(self, _idx):
         method = self.exportMethodCombo.currentData() or "playblast"
         set_manual_export_method(method)   # 選択を記憶（次回起動時も維持）
@@ -3918,13 +3913,6 @@ class OGPipelineWindow(QWidget):
         if dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec():
             dlg.save()
             # 環境設定は自動更新用。手動の方式プルダウンとは独立なので同期しない。
-            # 自動書き出しの ON/OFF だけ、ムービーバーのチェックと同期する。
-            try:
-                self.autoExportCheck.blockSignals(True)
-                self.autoExportCheck.setChecked(get_auto_export_on_save())
-                self.autoExportCheck.blockSignals(False)
-            except Exception:
-                pass
             self.statusLabel.setText(
                 "環境設定を保存しました（自動更新の方式: %s ／ 自動更新: %s ／ 最小間隔: %d分）"
                 % (get_export_method(),
@@ -4185,15 +4173,7 @@ class OGPipelineWindow(QWidget):
         ec.setContentsMargins(0, 0, 0, 0)
         ec.setSpacing(8)
 
-        # 保存時の自動書き出し ON/OFF（環境設定と同じ値。ここで素早く切替できる）
-        self.autoExportCheck = QCheckBox("保存時に自動書き出し")
-        self.autoExportCheck.setStyleSheet("font-size: 11px;")
-        self.autoExportCheck.setToolTip(
-            "ON のときだけ、シーン保存（Ctrl+S）で自動書き出しします（最小間隔は環境設定）。\n"
-            "OFF（既定）なら保存しても書き出しは走りません。")
-        self.autoExportCheck.setChecked(get_auto_export_on_save())
-        self.autoExportCheck.toggled.connect(self._on_auto_export_toggled)
-        ec.addWidget(self.autoExportCheck)
+        # 「保存時に自動書き出し」のトグルは環境設定に集約したため、ここには置かない。
 
         # 方式プルダウン（手動書き出し用。環境設定とは独立。初期値は設定から）
         mrow = QHBoxLayout()
