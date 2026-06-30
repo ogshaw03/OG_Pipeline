@@ -3699,6 +3699,18 @@ class OGPipelineWindow(QWidget):
         # 保存時の自動書き出し（SceneSaved を監視。判定は実行時に設定を読む）
         self._register_save_job()
 
+        # 起動時フォーカスを検索欄ではなくブラウザに置く
+        QTimer.singleShot(0, self._focus_browser)
+
+    def _focus_browser(self):
+        """ブラウザの先頭カラムにフォーカスを当てる（検索欄の自動フォーカス回避）。"""
+        try:
+            cols = getattr(self.browser, "_columns", [])
+            if cols:
+                cols[0].setFocus()
+        except Exception:
+            pass
+
     def _register_save_job(self):
         """Maya の SceneSaved イベントを監視する scriptJob を登録する。"""
         try:
@@ -4080,6 +4092,8 @@ class OGPipelineWindow(QWidget):
 
         self.searchBar = QLineEdit()
         self.searchBar.setObjectName("searchBar")
+        # クリック時のみフォーカス（起動時やカラム再構築で自動フォーカスされないように）
+        self.searchBar.setFocusPolicy(Qt.ClickFocus)
         self.searchBar.setPlaceholderText("ファイル名またはパスで検索（ルート以下を再帰検索）…")
         self.searchBar.textChanged.connect(self._apply_view)
         layout.addWidget(self.searchBar, 1)
