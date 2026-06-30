@@ -397,7 +397,8 @@ DEFAULT_TAKE_PREFIX = "t"
 DEFAULT_LOCAL_PREFIX = "v"
 DEFAULT_TAKE_DIGITS = 2
 DEFAULT_LOCAL_DIGITS = 3
-# ベースネーム内でテイク/ローカルのスロットを表す既定の語（区切りは '_' 固定）。
+# ベースネーム内で工程/テイク/ローカルのスロットを表す既定の語（区切りは '_' 固定）。
+DEFAULT_STAGE_MARKER = "工程"
 DEFAULT_TAKE_MARKER = "テイク"
 DEFAULT_LOCAL_MARKER = "ローカルバージョン"
 
@@ -555,11 +556,12 @@ def _format_version_value(value, prefix, digits):
 
 
 def apply_base_name(stem, base_name, stage, token_cfg=None,
-                    take_marker=DEFAULT_TAKE_MARKER, local_marker=DEFAULT_LOCAL_MARKER):
+                    take_marker=DEFAULT_TAKE_MARKER, local_marker=DEFAULT_LOCAL_MARKER,
+                    stage_marker=DEFAULT_STAGE_MARKER):
     """ベースネームをテンプレートに、スロットを置換した新 stem を返す（区切り '_'）。
 
     スロット識別（ベースネーム内の語）:
-      - 工程   … stage['rename_from']（無ければ name）の語 → rename_to へ置換
+      - 工程   … stage_marker（プロジェクト共通の語。既定 '工程'）→ stage['rename_to'] へ置換
       - テイク … take_marker の語 → 接頭辞＋桁で整形した take 値へ置換
       - ローカル … local_marker の語 → 接頭辞＋桁で整形した local 値へ置換
     スロット以外のセグメントは現シーン名(stem)から引き継ぐ（前方/後方ブロックで整列）。
@@ -569,7 +571,9 @@ def apply_base_name(stem, base_name, stage, token_cfg=None,
     if not base_name:
         return None
     cfg = token_cfg or {}
-    stage_marker = (stage.get("rename_from") or stage.get("name") or "").strip()
+    # 工程スロット語はプロジェクト共通。未設定なら工程行の rename_from/name にフォールバック。
+    stage_marker = (stage_marker or "").strip() \
+        or (stage.get("rename_from") or stage.get("name") or "").strip()
     target = (stage.get("rename_to") or stage.get("name") or "").strip()
     take_tok = _format_version_value(stage.get("take", ""),
                                      cfg.get("take_prefix", DEFAULT_TAKE_PREFIX),
@@ -1096,7 +1100,9 @@ def _normalize_entries(data):
             # 命名規則ベースネーム（例: test_ep01_sh001_工程_テイク_ローカルバージョン）。
             # 空なら従来のトークン置換でリネームする。
             "base_name": str(e.get("base_name", "")).strip(),
-            # ベースネーム内でテイク/ローカルのスロットを表す語。
+            # ベースネーム内で工程/テイク/ローカルのスロットを表す語。
+            "stage_marker": (str(e.get("stage_marker", DEFAULT_STAGE_MARKER)).strip()
+                             or DEFAULT_STAGE_MARKER),
             "take_marker": (str(e.get("take_marker", DEFAULT_TAKE_MARKER)).strip()
                             or DEFAULT_TAKE_MARKER),
             "local_marker": (str(e.get("local_marker", DEFAULT_LOCAL_MARKER)).strip()
@@ -1174,6 +1180,8 @@ def add_root(name, path, shots_parent="", stage_subpath="", stages=None,
                   "stage_subpath": (stage_subpath or "").strip().strip("/\\"),
                   "subpath_label": (subpath_label or "").strip(),
                   "base_name": str(cfg.get("base_name", "")).strip(),
+                  "stage_marker": (str(cfg.get("stage_marker", DEFAULT_STAGE_MARKER)).strip()
+                                   or DEFAULT_STAGE_MARKER),
                   "take_marker": (str(cfg.get("take_marker", DEFAULT_TAKE_MARKER)).strip()
                                   or DEFAULT_TAKE_MARKER),
                   "local_marker": (str(cfg.get("local_marker", DEFAULT_LOCAL_MARKER)).strip()
@@ -3763,6 +3771,17 @@ class ProjectSettingsDialog(QDialog):
             "例: test_ep01_sh001_工程_テイク_ローカルバージョン（空＝従来のトークン置換）")
         outer.addWidget(self.baseNameEdit)
 
+        # 工程スロット語（プロジェクト共通。ベースネーム内の工程位置を表す）
+        stg_row = QHBoxLayout()
+        stg_row.setSpacing(6)
+        stg_row.addWidget(QLabel("工程 語:"))
+        self.stageMarkerEdit = QLineEdit(entry.get("stage_marker", DEFAULT_STAGE_MARKER))
+        self.stageMarkerEdit.setFixedWidth(110)
+        self.stageMarkerEdit.setToolTip("ベースネーム内で工程位置を表す語（工程リストの〔リネーム先〕へ置換）")
+        stg_row.addWidget(self.stageMarkerEdit)
+        stg_row.addStretch(1)
+        outer.addLayout(stg_row)
+
         # テイク／ローカルの「スロット語」と「形式（接頭辞＋桁）」
         tok_row = QHBoxLayout()
         tok_row.setSpacing(6)
@@ -3803,8 +3822,8 @@ class ProjectSettingsDialog(QDialog):
         outer.addLayout(tok_row)
         tok_hint = QLabel(
             "ベースネームを設定すると、別工程へ保存時にこの構造で命名します。"
-            "『工程スロット』は工程リストの〔リネーム元〕の語で識別し〔リネーム先〕へ置換、"
-            "テイク/ローカルは上の〔語〕で識別し接頭辞＋桁で整形、それ以外（test/ep01/sh001 等）は"
+            "『工程スロット』は上の〔工程 語〕で識別し、選んだ工程の〔リネーム先〕へ置換、"
+            "テイク/ローカルは各〔語〕で識別し接頭辞＋桁で整形、それ以外（test/ep01/sh001 等）は"
             "現在のシーン名から引き継ぎます。TAKE UP は接頭辞＋桁でテイク番号を+1します。")
         tok_hint.setWordWrap(True)
         tok_hint.setStyleSheet("color: #4a5568; font-size: 10px;")
@@ -3836,9 +3855,9 @@ class ProjectSettingsDialog(QDialog):
         srow.addWidget(addStageBtn)
         srow.addWidget(delStageBtn)
         srow.addStretch(1)
-        shint = QLabel("例: 工程名=lay_pri / 工程フォルダ=ma/lay_pri / "
-                       "リネーム元=ベースネーム内の工程スロット語（例 工程）/ リネーム先=lay_pri / "
-                       "テイク=01 / ローカル=001")
+        shint = QLabel("例: 工程名=lay_pri / 工程フォルダ=ma/lay_pri / リネーム先=lay_pri / "
+                       "テイク=01 / ローカル=001 ／ ベースネーム運用ではリネーム先が工程スロットに入ります"
+                       "（リネーム元は従来のトークン置換用）")
         shint.setStyleSheet("color: #4a5568; font-size: 10px;")
         srow.addWidget(shint)
         outer.addLayout(srow)
@@ -4016,6 +4035,7 @@ class ProjectSettingsDialog(QDialog):
             self._add_subpath_row(pat, nm)
         self.labelEdit.setText(entry.get("subpath_label", ""))
         self.baseNameEdit.setText(entry.get("base_name", ""))
+        self.stageMarkerEdit.setText(entry.get("stage_marker", DEFAULT_STAGE_MARKER))
         self.takeMarkerEdit.setText(entry.get("take_marker", DEFAULT_TAKE_MARKER))
         self.localMarkerEdit.setText(entry.get("local_marker", DEFAULT_LOCAL_MARKER))
         self.takePrefixEdit.setText(entry.get("take_prefix", DEFAULT_TAKE_PREFIX))
@@ -4076,6 +4096,7 @@ class ProjectSettingsDialog(QDialog):
             "stage_subpath": self._subpaths_from_table(),
             "subpath_label": self.labelEdit.text().strip(),
             "base_name": self.baseNameEdit.text().strip(),
+            "stage_marker": self.stageMarkerEdit.text().strip() or DEFAULT_STAGE_MARKER,
             "take_marker": self.takeMarkerEdit.text().strip() or DEFAULT_TAKE_MARKER,
             "local_marker": self.localMarkerEdit.text().strip() or DEFAULT_LOCAL_MARKER,
             "take_prefix": self.takePrefixEdit.text().strip() or DEFAULT_TAKE_PREFIX,
@@ -4975,7 +4996,8 @@ class OGPipelineWindow(QWidget):
 
     @staticmethod
     def _default_token_cfg():
-        return {"base_name": "", "take_marker": DEFAULT_TAKE_MARKER,
+        return {"base_name": "", "stage_marker": DEFAULT_STAGE_MARKER,
+                "take_marker": DEFAULT_TAKE_MARKER,
                 "local_marker": DEFAULT_LOCAL_MARKER,
                 "take_prefix": DEFAULT_TAKE_PREFIX, "take_digits": DEFAULT_TAKE_DIGITS,
                 "local_prefix": DEFAULT_LOCAL_PREFIX, "local_digits": DEFAULT_LOCAL_DIGITS}
@@ -5004,6 +5026,7 @@ class OGPipelineWindow(QWidget):
         self.active_stages = entry.get("stages", []) or []
         self.active_token_cfg = {
             "base_name": entry.get("base_name", ""),
+            "stage_marker": entry.get("stage_marker", DEFAULT_STAGE_MARKER),
             "take_marker": entry.get("take_marker", DEFAULT_TAKE_MARKER),
             "local_marker": entry.get("local_marker", DEFAULT_LOCAL_MARKER),
             "take_prefix": entry.get("take_prefix", DEFAULT_TAKE_PREFIX),
@@ -5026,6 +5049,7 @@ class OGPipelineWindow(QWidget):
             add_root(v["name"], v["path"], v["shots_parent"], v["stage_subpath"],
                      v.get("stages"), subpath_label=v.get("subpath_label", ""),
                      token_cfg={"base_name": v.get("base_name", ""),
+                                "stage_marker": v.get("stage_marker", DEFAULT_STAGE_MARKER),
                                 "take_marker": v.get("take_marker", DEFAULT_TAKE_MARKER),
                                 "local_marker": v.get("local_marker", DEFAULT_LOCAL_MARKER),
                                 "take_prefix": v.get("take_prefix", DEFAULT_TAKE_PREFIX),
@@ -5737,7 +5761,8 @@ class OGPipelineWindow(QWidget):
         cfg = getattr(self, "active_token_cfg", None) or self._default_token_cfg()
         new_stem = apply_base_name(stem, cfg.get("base_name", ""), stage, cfg,
                                    cfg.get("take_marker", DEFAULT_TAKE_MARKER),
-                                   cfg.get("local_marker", DEFAULT_LOCAL_MARKER))
+                                   cfg.get("local_marker", DEFAULT_LOCAL_MARKER),
+                                   cfg.get("stage_marker", DEFAULT_STAGE_MARKER))
         if not new_stem:
             # ベースネーム未設定 → 従来のトークン置換
             new_stem = apply_stage_rename(stem, stage, stages, cfg)
