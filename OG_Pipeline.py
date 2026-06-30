@@ -1539,17 +1539,22 @@ class GridVideoCell(QWidget):
 
     def __init__(self, title, media, stage="", on_click=None, payload=None,
                  title_color=None, folder=None, on_drill=None,
-                 drill_label="⮞ リーブ", show_header=True, parent=None):
+                 drill_label="⮞ リーブ", show_header=True, hover=True, parent=None):
         super().__init__(parent)
         self.setFixedWidth(self.CELL_W)
         self.setObjectName("gridCell")
         # QWidget サブクラスはこの属性が無いと QSS の背景/枠（:hover 含む）が描画されない
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setAttribute(Qt.WA_Hover, True)
-        self.setStyleSheet(
-            "#gridCell { background: transparent; border: 1px solid transparent;"
-            " border-radius: 5px; }"
-            "#gridCell:hover { background: #161c2b; border: 1px solid #e8a838; }")
+        if hover:
+            self.setAttribute(Qt.WA_Hover, True)
+            self.setStyleSheet(
+                "#gridCell { background: transparent; border: 1px solid transparent;"
+                " border-radius: 5px; }"
+                "#gridCell:hover { background: #161c2b; border: 1px solid #e8a838; }")
+        else:
+            self.setStyleSheet(
+                "#gridCell { background: transparent; border: 1px solid transparent;"
+                " border-radius: 5px; }")
         self._cv_thread = None
         self._frames = []
         self._idx = 0
@@ -2156,7 +2161,8 @@ class AllShotsDialog(QDialog):
         for stage_name, media, _mt in reversed(stages):   # 新しい工程を上に
             cell = GridVideoCell(stage_name, media, title_color=stage_color(stage_name),
                                  folder=os.path.join(base, stage_name),
-                                 on_drill=self._drill_to, parent=self._side_content)
+                                 on_drill=self._drill_to, hover=False,
+                                 parent=self._side_content)
             self._side_layout.addWidget(cell)
             self._side_cells.append(cell)
         self._side_layout.addStretch()
