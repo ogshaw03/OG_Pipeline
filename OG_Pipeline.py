@@ -1990,38 +1990,70 @@ class DetailPanel(QWidget):
     def reload_video(self):
         """現在表示中の動画／連番を再探索して反映（プレイブラスト直後など）。"""
         if self._shot_folder:
-            self.show_folder_video(self._shot_folder)
+            self.show_folder_video(self._shot_folder,
+                                   getattr(self, "_stage_subpath", ""),
+                                   getattr(self, "_is_shot", False))
         elif self._abs_path:
             self._show_media(self._abs_path)
 
-    def show_folder_video(self, folder):
+    @staticmethod
+    def _stage_of_path(media_path, folder, stage_subpath):
+        """再生メディアのパスから、それが属する工程フォルダ名を求める。無ければ ""。"""
+        try:
+            base = stage_container(folder, stage_subpath)
+            rel = os.path.relpath(media_path, base)
+            parts = [p for p in rel.replace("\\", "/").split("/") if p]
+            if parts and parts[0] not in ("..", "."):
+                return parts[0]
+        except Exception:
+            pass
+        return ""
+
+    def show_folder_video(self, folder, stage_subpath="", is_shot=False):
         """選択フォルダ（ショット／工程）配下の最新メディアをサイドバーで再生する。
 
         cv2 があれば動画(mp4)を、無ければ Pipeline_Movie の連番を再生する。
+        ショットフォルダ選択時は、再生中の動画がどの工程のものかを表示する。
         """
         self._abs_path = ""
         self._shot_folder = folder
+        self._stage_subpath = stage_subpath
+        self._is_shot = is_shot
         self._clear_layout()
         name = Path(folder).name
         media = pick_folder_media(folder)
         sub_text = "このフォルダに動画／連番はありません"
+        media_path = ""
         if hasattr(self, "video"):
             if media is None:
                 self.video.clear_player()
             elif media[0] == "video":
                 self.video.set_video(media[1])
                 sub_text = f"最新動画: {Path(media[1]).name}"
+                media_path = media[1]
             elif media[0] == "seq":
                 self.video.set_sequence(media[1])
                 sub_text = f"最新の連番（{len(media[1])} 枚）"
+                media_path = media[1][0] if media[1] else ""
             else:  # "ext"
                 self.video.set_external(media[1])
                 sub_text = f"動画: {Path(media[1]).name}（外部再生）"
+                media_path = media[1]
 
         title = QLabel(f"📁  {name}")
         title.setObjectName("detailFilename")
         title.setWordWrap(True)
         self.contentLayout.addWidget(title)
+
+        # 再生中の動画がどの工程のものかを表示（ショット選択時）
+        stage = self._stage_of_path(media_path, folder, stage_subpath) if (is_shot and media_path) else ""
+        if stage:
+            badge = QLabel(f"工程:  {stage}")
+            badge.setStyleSheet(
+                "color: #0f1117; background: %s; border-radius: 3px;"
+                " padding: 3px 10px; font-size: 12px; font-weight: bold;" % stage_color(stage))
+            self.contentLayout.addWidget(badge)
+
         sub = QLabel(sub_text)
         sub.setObjectName("detailValue")
         sub.setWordWrap(True)
@@ -3682,9 +3714,11 @@ class OGPipelineWindow(QWidget):
         self.openBtn.setEnabled(False)
         self.importBtn.setEnabled(False)
         self.openFolderBtn.setEnabled(False)
-        label = "ショット" if self._is_shot_folder(folder) else "フォルダ"
+        is_shot = self._is_shot_folder(folder)
+        label = "ショット" if is_shot else "フォルダ"
         self.selectedLabel.setText(f"{label}: {Path(folder).name}（配下の最新動画）")
-        self.detailPanel.show_folder_video(folder)
+        self.detailPanel.show_folder_video(
+            folder, getattr(self, "active_stage_subpath", ""), is_shot)
 
     # ════════════════════════════════════════════════════════════════════
     #  表示（カラム表示／再帰検索）
