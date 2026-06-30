@@ -2237,6 +2237,13 @@ class DetailPanel(QWidget):
         vlay = QVBoxLayout(vwrap)
         vlay.setContentsMargins(12, 10, 12, 6)
         vlay.addWidget(self.video)
+        # フォルダを開く（選択中のシーン／フォルダをエクスプローラーで開く）
+        self.openFolderBtn = QPushButton("📂  フォルダを開く")
+        self.openFolderBtn.setObjectName("refreshBtn")
+        self.openFolderBtn.setToolTip("選択中のシーン／フォルダをエクスプローラーで開く")
+        self.openFolderBtn.setEnabled(False)
+        self.openFolderBtn.clicked.connect(self._open_folder)
+        vlay.addWidget(self.openFolderBtn)
         layout.addWidget(vwrap)
 
         self.content = QWidget()
@@ -2259,6 +2266,12 @@ class DetailPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+    def _open_folder(self):
+        """現在表示中のシーン／フォルダをエクスプローラーで開く。"""
+        target = self._abs_path or self._shot_folder
+        if target:
+            reveal_in_explorer(target)
+
     def _show_media(self, abs_path):
         """連番画像があればフリップブック再生、無ければ単一動画、どちらも無ければクリア。"""
         seq = find_scene_sequence(abs_path)
@@ -2271,6 +2284,8 @@ class DetailPanel(QWidget):
         self._clear_layout()
         self._abs_path = ""
         self._shot_folder = ""
+        if hasattr(self, "openFolderBtn"):
+            self.openFolderBtn.setEnabled(False)
         if hasattr(self, "video"):
             self.video.clear_player()
         placeholder = QLabel("ファイルを選択すると\n詳細が表示されます")
@@ -2311,6 +2326,8 @@ class DetailPanel(QWidget):
         self._shot_folder = folder
         self._stage_subpath = stage_subpath
         self._is_shot = is_shot
+        if hasattr(self, "openFolderBtn"):
+            self.openFolderBtn.setEnabled(bool(folder))
         self._clear_layout()
         name = Path(folder).name
         media = pick_folder_media(folder)
@@ -2355,6 +2372,8 @@ class DetailPanel(QWidget):
     def update_info(self, rel_path: str, abs_path: str, size: int, mtime: float):
         self._abs_path = abs_path
         self._shot_folder = ""
+        if hasattr(self, "openFolderBtn"):
+            self.openFolderBtn.setEnabled(bool(abs_path))
         if hasattr(self, "video"):
             self._show_media(abs_path)
         self._clear_layout()
@@ -3879,13 +3898,7 @@ class OGPipelineWindow(QWidget):
         self.selectedLabel.setStyleSheet("color: #2a3045; font-size: 11px;")
         ab_layout.addWidget(self.selectedLabel, 1)
 
-        # 選択中のシーンのフォルダをエクスプローラー（OS のファイラ）で開く
-        self.openFolderBtn = QPushButton("📂  フォルダを開く")
-        self.openFolderBtn.setObjectName("refreshBtn")
-        self.openFolderBtn.setToolTip("選択中のシーンのフォルダをエクスプローラーで開く")
-        self.openFolderBtn.setEnabled(False)
-        self.openFolderBtn.clicked.connect(self._open_in_explorer)
-        ab_layout.addWidget(self.openFolderBtn)
+        # 「フォルダを開く」は詳細パネル（サイドバー）側に移動した
 
         # 現在開いているシーンを、そのシーンのフォルダを既定にして別名保存する
         self.saveAsBtn = QPushButton("⤓  SAVE AS")
@@ -3909,9 +3922,9 @@ class OGPipelineWindow(QWidget):
         ab_layout.addWidget(self.takeUpBtn)
 
         # 別工程として保存（工程設定に従いリネーム＋テイク/ローカルを初期値にリセット）
-        self.saveStageBtn = QPushButton("→  SAVE 別工程")
+        self.saveStageBtn = QPushButton("↪  SAVE TO STAGE")
+        self.saveStageBtn.setToolTip("別工程として保存：選択した工程のフォルダに、命名規則でリネームして保存（テイク/ローカルは初期値）")
         self.saveStageBtn.setObjectName("refreshBtn")
-        self.saveStageBtn.setToolTip("選択した工程のフォルダに、命名規則でリネームして保存（テイク/ローカルは初期値）")
         self.saveStageBtn.clicked.connect(self._save_to_stage)
         ab_layout.addWidget(self.saveStageBtn)
 
@@ -4081,7 +4094,6 @@ class OGPipelineWindow(QWidget):
         self._current_folder = folder    # リーブ中フォルダ（新規保存先の候補）
         self._selected_path = ""
         self.openBtn.setEnabled(False)
-        self.openFolderBtn.setEnabled(False)
         is_shot = self._is_shot_folder(folder)
         label = "ショット" if is_shot else "フォルダ"
         self.selectedLabel.setText(f"{label}: {Path(folder).name}（配下の最新動画）")
@@ -4097,7 +4109,6 @@ class OGPipelineWindow(QWidget):
 
         self._selected_path = ""
         self.openBtn.setEnabled(False)
-        self.openFolderBtn.setEnabled(False)
         self.detailPanel.clear()
         self.selectedLabel.setText("ファイルを選択してください")
 
@@ -4157,14 +4168,12 @@ class OGPipelineWindow(QWidget):
         if not info:
             self._selected_path = ""
             self.openBtn.setEnabled(False)
-            self.openFolderBtn.setEnabled(False)
             self.selectedLabel.setText("ファイルを選択してください")
             self.detailPanel.clear()
             return
         self._selected_path = info["abs"]
         self._current_folder = os.path.dirname(info["abs"])   # リーブ中フォルダ
         self.openBtn.setEnabled(True)
-        self.openFolderBtn.setEnabled(True)
         self.selectedLabel.setText(f"選択: {Path(info['abs']).name}")
         self.detailPanel.update_info(info["rel"], info["abs"], info["size"], info["mtime"])
 
@@ -4696,7 +4705,7 @@ class OGPipelineWindow(QWidget):
         try:
             import maya.cmds as cmds
         except ImportError:
-            QMessageBox.information(self, "SAVE 別工程",
+            QMessageBox.information(self, "別工程へ保存",
                                     "Maya 内で実行すると、選択した工程フォルダにリネーム保存します。")
             return
         stages = getattr(self, "active_stages", []) or []
@@ -4707,7 +4716,7 @@ class OGPipelineWindow(QWidget):
             return
         cur = cmds.file(q=True, sceneName=True) or ""
         if not cur:
-            QMessageBox.warning(self, "SAVE 別工程", "保存済みのシーンがありません。")
+            QMessageBox.warning(self, "別工程へ保存", "保存済みのシーンがありません。")
             return
 
         # 対象工程を選ぶ（ブラウザ選択中フォルダに一致する工程を初期選択）
@@ -4721,14 +4730,14 @@ class OGPipelineWindow(QWidget):
                 default_idx = i
                 break
         choice, ok = QInputDialog.getItem(
-            self, "SAVE 別工程", "保存先の工程を選択:", names, default_idx, False)
+            self, "別工程へ保存", "保存先の工程を選択:", names, default_idx, False)
         if not ok or not choice:
             return
         stage = stages[names.index(choice)]
 
         if not shot_folder:
             QMessageBox.warning(
-                self, "SAVE 別工程",
+                self, "別工程へ保存",
                 "現在のシーンからショットフォルダを特定できませんでした。\n"
                 "（プロジェクト設定の『ショットフォルダの親』を確認してください）")
             return
