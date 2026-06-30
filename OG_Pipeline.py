@@ -2350,6 +2350,27 @@ class OGPipelineWindow(QWidget):
             self._select_in_combo(get_startup_root())
         self._apply_root()
 
+        # 現在のシーン名を定期的に更新（ツール外で開閉されても追従する）
+        self._update_current_scene_label()
+        self._sceneTimer = QTimer(self)
+        self._sceneTimer.timeout.connect(self._update_current_scene_label)
+        self._sceneTimer.start(1500)
+
+    def _update_current_scene_label(self):
+        """ヘッダー中央に現在開いている Maya シーン名を表示する。"""
+        name = ""
+        try:
+            import maya.cmds as cmds
+            name = cmds.file(q=True, sceneName=True) or ""
+        except Exception:
+            name = ""
+        if name:
+            self.currentSceneLabel.setText("🎬  " + os.path.basename(name))
+            self.currentSceneLabel.setToolTip(name)
+        else:
+            self.currentSceneLabel.setText("🎬  (未保存のシーン)")
+            self.currentSceneLabel.setToolTip("")
+
     # ════════════════════════════════════════════════════════════════════
     #  UI 構築
     # ════════════════════════════════════════════════════════════════════
@@ -2405,6 +2426,14 @@ class OGPipelineWindow(QWidget):
         layout.addLayout(title_col)
         layout.addStretch()
 
+        # 中央: 現在開いている Maya シーン名
+        self.currentSceneLabel = QLabel("🎬  (シーン未取得)")
+        self.currentSceneLabel.setStyleSheet(
+            "color: #e8c87a; font-size: 13px; font-weight: bold;")
+        self.currentSceneLabel.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.currentSceneLabel)
+        layout.addStretch()
+
         self.rootPathLabel = QLabel("▸  ルート未選択")
         self.rootPathLabel.setObjectName("rootPathLabel")
         layout.addWidget(self.rootPathLabel)
@@ -2438,9 +2467,9 @@ class OGPipelineWindow(QWidget):
         sep.setStyleSheet("color: #1e2435;")
         layout.addWidget(sep)
 
-        self.addRootBtn = QPushButton("＋  追加")
+        self.addRootBtn = QPushButton("⚙  プロジェクト設定")
         self.addRootBtn.setObjectName("refreshBtn")
-        self.addRootBtn.setToolTip("フォルダを選んでルートを新規登録")
+        self.addRootBtn.setToolTip("フォルダを選んでプロジェクト（ルート）を新規登録")
         self.addRootBtn.clicked.connect(self._add_root)
         layout.addWidget(self.addRootBtn)
 
@@ -2480,7 +2509,7 @@ class OGPipelineWindow(QWidget):
 
     def _open_all_shots(self):
         if not self.active_shots_parent or not os.path.isdir(str(self.active_shots_parent)):
-            self.statusLabel.setText("ショットフォルダの親が未設定です（[＋ 追加] で指定）")
+            self.statusLabel.setText("ショットフォルダの親が未設定です（[プロジェクト設定] で指定）")
             return
         # 既存ウィンドウは閉じる（裏でデコードスレッドが溜まるのを防ぐ）
         old = getattr(self, "_all_shots_dlg", None)
@@ -2522,6 +2551,10 @@ class OGPipelineWindow(QWidget):
         実行中の QThread が破棄されると Qt がプロセスごと落ちる（＝Maya クラッシュ）。
         埋め込みプレイヤー・全ショットダイアログ・検索スレッドを明示的に停止する。
         """
+        try:
+            self._sceneTimer.stop()
+        except Exception:
+            pass
         try:
             self.detailPanel.video.stop()
         except Exception:
@@ -2723,7 +2756,7 @@ class OGPipelineWindow(QWidget):
             self.rootPathLabel.setText("▸  ルート未登録")
             self.browser.set_root(None)
             self.statusLabel.setText(
-                "プロジェクトルート未登録 — [＋ 追加] か [⭳ インポート] で登録してください"
+                "プロジェクトルート未登録 — [プロジェクト設定] か [⭳ インポート] で登録してください"
             )
             return
         entry = find_root_entry(name) or {}
@@ -3570,7 +3603,7 @@ class OGPipelineWindow(QWidget):
 #       importlib.reload(OG_Pipeline)
 #       OG_Pipeline.main()
 #
-#   3) 初回は [＋ 追加] でプロジェクトルートを登録（または [⭳ インポート] で JSON を取込）。
+#   3) 初回は [プロジェクト設定] でプロジェクトルートを登録（または [⭳ インポート] で JSON を取込）。
 #      [★ 次回も使用] を押すと、そのルートが次回起動時に自動で選択される。
 #
 # 【重要】QApplication は絶対に新規作成しない。
