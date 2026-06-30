@@ -339,20 +339,28 @@ def shot_folder_of(scene_path, shots_parent):
 def resolve_stage_dir(stage, shot_folder, stage_subpath=""):
     """工程の保存先フォルダを解決する。
 
-    stage['folder'] が絶対パスならそれを、相対ならショットフォルダ起点で解決する。
-    folder 未設定なら <stage_container>/<工程名> にフォールバックする。
+    stage['folder'] は「サブパス起点」の相対パスとして扱う:
+      - 起点(base) = サブパスがあれば <ショット>/<サブパス>、無ければ <ショット>
+      - 保存先 = base / stage['folder']
+    stage['folder'] が絶対パスならそのまま使う。
+    stage['folder'] 未設定なら base/<工程名> にフォールバックする。
     """
     folder = (stage.get("folder") or "").strip()
-    if folder:
-        if os.path.isabs(folder):
-            return os.path.normpath(folder)
-        if shot_folder:
-            return os.path.normpath(os.path.join(
-                shot_folder, *folder.replace("\\", "/").split("/")))
+    if folder and os.path.isabs(folder):
         return os.path.normpath(folder)
-    # フォールバック: 工程コンテナ直下の工程名フォルダ
-    if shot_folder:
-        return os.path.join(stage_container(shot_folder, stage_subpath), stage.get("name", ""))
+
+    # 起点(base): サブパスがあれば <ショット>/<サブパス>、無ければショットフォルダ自身
+    base = shot_folder or ""
+    if stage_subpath:
+        base = (os.path.join(shot_folder, *stage_subpath.replace("\\", "/").split("/"))
+                if shot_folder else stage_subpath)
+
+    if folder:
+        parts = folder.replace("\\", "/").split("/")
+        return os.path.normpath(os.path.join(base, *parts)) if base else os.path.normpath(folder)
+    # folder 未設定 → base/<工程名>
+    if base:
+        return os.path.normpath(os.path.join(base, stage.get("name", "")))
     return ""
 
 
