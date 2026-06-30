@@ -2407,11 +2407,22 @@ class DetailPanel(QWidget):
         """サイドバー最下部にウィジェットを追加する（動画書き出しグループ等）。"""
         self._root_layout.addWidget(w)
 
-    def _clear_layout(self):
-        while self.contentLayout.count():
-            item = self.contentLayout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+    def _clear_layout(self, layout=None):
+        """レイアウト内の全ウィジェットを削除する（サブレイアウトも再帰）。
+
+        SIZE / MODIFIED 行などは addLayout で追加されており、ウィジェットだけ
+        見ると取りこぼす。サブレイアウト内の QLabel も確実に消すため再帰する。
+        """
+        lay = layout if layout is not None else self.contentLayout
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)      # 即座に画面から外す（古い値が残らない）
+                w.deleteLater()
+            elif item.layout() is not None:
+                self._clear_layout(item.layout())
+                item.layout().deleteLater()
 
     def _open_folder(self):
         """現在表示中のシーン／フォルダをエクスプローラーで開く。"""
@@ -2530,10 +2541,8 @@ class DetailPanel(QWidget):
         try:
             st = os.stat(abs_path)
             size, mtime = st.st_size, st.st_mtime
-        except Exception as e:
-            print("[OG_Pipeline] update_info stat 失敗:", abs_path, e)
-        print("[OG_Pipeline] update_info:", abs_path, "mtime=", mtime,
-              "shown=", getattr(self, "_shown_mtime", None))
+        except Exception:
+            pass
         # 同じファイル かつ 更新日時も同じならちらつき防止で作り直さない
         if (abs_path and abs_path == self._abs_path and not self._shot_folder
                 and mtime == getattr(self, "_shown_mtime", None)):
@@ -2585,7 +2594,6 @@ class DetailPanel(QWidget):
         ext = p.suffix.lower()
         size_str = self._fmt_size(size)
         mtime_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d  %H:%M")
-        print("[OG_Pipeline] _update_info_body 表示:", p.name, "MODIFIED=", mtime_str)
 
         fn_label = QLabel(p.name)
         fn_label.setObjectName("detailFilename")
@@ -4505,7 +4513,6 @@ class OGPipelineWindow(QWidget):
         self._current_folder = os.path.dirname(info["abs"])   # リーブ中フォルダ
         self.openBtn.setEnabled(True)
         self.selectedLabel.setText(f"選択: {Path(info['abs']).name}")
-        print("[OG_Pipeline] _on_file_selected:", info.get("abs"))
         self.detailPanel.update_info(info["rel"], info["abs"], info["size"], info["mtime"])
 
     def _open_path(self, path):
