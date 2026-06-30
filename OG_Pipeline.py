@@ -1472,9 +1472,14 @@ class VideoPlayer(QWidget):
     # ── cv2 による mp4 再生（別スレッドでデコード→QLabel に描画） ─
     def _start_cv2(self, path):
         try:
+            # 直前のフレーム/外部ボタンを消してから「読み込み中」だけを表示
+            # （前のフレーム＋読み込み中＋外部ボタンが重なってチカつくのを防ぐ）
+            self._frameLabel.hide()
+            self._frameLabel.clear()
+            self._counter.hide()
+            self._openBtn.hide()
             self._placeholder.setText("動画を読み込み中…")
             self._placeholder.show()
-            self._openBtn.show()
             self._cv_thread = Cv2VideoThread(path, max_w=640, parent=self)
             self._cv_thread.frameReady.connect(self._paint_image)
             self._cv_thread.start()
