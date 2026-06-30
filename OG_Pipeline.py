@@ -1042,7 +1042,8 @@ class GridVideoCell(QWidget):
     CELL_W, CELL_H = 208, 90
 
     def __init__(self, title, media, stage="", on_click=None, payload=None,
-                 title_color=None, folder=None, on_drill=None, parent=None):
+                 title_color=None, folder=None, on_drill=None,
+                 drill_label="⮞ 工程フォルダを開く", parent=None):
         super().__init__(parent)
         self.setFixedWidth(self.CELL_W)
         self.setObjectName("gridCell")
@@ -1145,17 +1146,19 @@ class GridVideoCell(QWidget):
                         " border: 1px solid #2a3147; border-radius: 3px;"
                         " font-size: 10px; padding: 1px 4px; }"
                         "QPushButton:hover { background: #232b40; color: #e8c87a; }")
-            drillBtn = QPushButton("⮞ 工程")
-            drillBtn.setFixedHeight(17)
-            drillBtn.setStyleSheet(mini_btn)
-            drillBtn.setToolTip("ブラウザでこの工程フォルダを開く")
-            drillBtn.clicked.connect(lambda _=False, f=folder: self._do_drill(f))
+            # 工程（ドリル）ボタンは on_drill が渡されたときだけ表示する
+            if on_drill:
+                drillBtn = QPushButton(drill_label)
+                drillBtn.setFixedHeight(17)
+                drillBtn.setStyleSheet(mini_btn)
+                drillBtn.setToolTip("ブラウザでこの工程フォルダを開く")
+                drillBtn.clicked.connect(lambda _=False, f=folder: self._do_drill(f))
+                brow.addWidget(drillBtn, 1)
             openBtn = QPushButton("📂 開く")
             openBtn.setFixedHeight(17)
             openBtn.setStyleSheet(mini_btn)
             openBtn.setToolTip("エクスプローラーでフォルダを開く")
             openBtn.clicked.connect(lambda _=False, f=folder: reveal_in_explorer(f))
-            brow.addWidget(drillBtn, 1)
             brow.addWidget(openBtn, 1)
             lay.addLayout(brow)
 
@@ -1520,9 +1523,10 @@ class AllShotsDialog(QDialog):
             data.sort(key=lambda s: s["name"].lower())
         r = c = 0
         for s in data:
+            # グリッドのタイルは工程（ドリル）ボタンなし。📂開くのみ。
             cell = GridVideoCell(s["name"], s["media"], stage=s["stage"],
                                  on_click=self._select_shot, payload=s["folder"],
-                                 folder=s["stage_folder"], on_drill=self._drill_to,
+                                 folder=s["stage_folder"], on_drill=None,
                                  parent=self._grid_content)
             self._grid.addWidget(cell, r, c, Qt.AlignLeft | Qt.AlignTop)
             self._cells.append(cell)
