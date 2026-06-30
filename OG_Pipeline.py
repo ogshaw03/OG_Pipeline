@@ -3540,14 +3540,33 @@ class ProjectSettingsDialog(QDialog):
         form.addRow("ショットフォルダの親:",
                     self._with_browse(self.shotsEdit, self._browse_shots))
 
-        # 複数指定できるよう複数行入力（1行に1パス。カンマ区切りも可）
-        self.stageEdit = QPlainTextEdit(entry.get("stage_subpath", ""))
-        self.stageEdit.setPlaceholderText(
-            "ショット親からの相対パス。1行に1つ。『パス = 表示名』で名前を付けられます。例:\n"
-            "Boss_003 = ボス\nchr_001\n*\n（* 可・空=直下。名前省略時は末尾フォルダ名）")
-        self.stageEdit.setFixedHeight(72)
-        form.addRow("サブパス（この直下がタイル）:",
-                    self._with_browse(self.stageEdit, self._browse_stage, "例から取得…"))
+        # サブパスは表で入力（左=パス / 右=表示名）。1行＝1サブパス。
+        self.subpathTable = QTableWidget(0, 2)
+        self.subpathTable.setHorizontalHeaderLabels(["サブパス（* 可・空=直下）", "表示名（省略可）"])
+        self.subpathTable.verticalHeader().setVisible(False)
+        shdr = self.subpathTable.horizontalHeader()
+        shdr.setSectionResizeMode(0, QHeaderView.Stretch)
+        shdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        self.subpathTable.setFixedHeight(96)
+        for pat, nm in _parse_subpath_items(entry.get("stage_subpath", "")):
+            self._add_subpath_row(pat, nm)
+        form.addRow("サブパス（この直下がタイル）:", self.subpathTable)
+
+        sprow = QHBoxLayout()
+        addSp = QPushButton("＋ 行を追加")
+        addSp.setObjectName("refreshBtn")
+        addSp.clicked.connect(lambda: self._add_subpath_row())
+        delSp = QPushButton("－ 選択行を削除")
+        delSp.setObjectName("refreshBtn")
+        delSp.clicked.connect(self._del_subpath_row)
+        exSp = QPushButton("例から取得…")
+        exSp.setObjectName("refreshBtn")
+        exSp.clicked.connect(self._browse_stage)
+        sprow.addWidget(addSp)
+        sprow.addWidget(delSp)
+        sprow.addWidget(exSp)
+        sprow.addStretch(1)
+        form.addRow("", self._wrap(sprow))
 
         # バッジ列の見出し呼称（リスト表示の列名。例: キャラ）
         self.labelEdit = QLineEdit(entry.get("subpath_label", ""))
@@ -3680,6 +3699,38 @@ class ProjectSettingsDialog(QDialog):
         h.addWidget(b)
         return w
 
+    @staticmethod
+    def _wrap(layout):
+        """レイアウトを QWidget に包んで返す（QFormLayout の addRow 用）。"""
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    # ── サブパス表の行操作 ─────────────────────────────
+    def _add_subpath_row(self, pattern="", name=""):
+        r = self.subpathTable.rowCount()
+        self.subpathTable.insertRow(r)
+        self.subpathTable.setItem(r, 0, QTableWidgetItem(pattern))
+        self.subpathTable.setItem(r, 1, QTableWidgetItem(name))
+
+    def _del_subpath_row(self):
+        rows = sorted({i.row() for i in self.subpathTable.selectedIndexes()}, reverse=True)
+        for r in rows:
+            self.subpathTable.removeRow(r)
+
+    def _subpaths_from_table(self):
+        """表を 'パス = 表示名'（名前なしは 'パス'）の改行区切り文字列にする。"""
+        lines = []
+        for r in range(self.subpathTable.rowCount()):
+            def cell(c):
+                it = self.subpathTable.item(r, c)
+                return it.text().strip() if it else ""
+            pat, nm = cell(0), cell(1)
+            if not pat:
+                continue
+            lines.append("%s = %s" % (pat, nm) if nm else pat)
+        return "\n".join(lines)
+
     def _browse_root(self):
         d = QFileDialog.getExistingDirectory(self, "プロジェクトルートを選択",
                                              self.rootEdit.text() or str(Path.home()))
@@ -3706,9 +3757,7 @@ class ProjectSettingsDialog(QDialog):
         if not d:
             return
         sub = self._derive_subpath(d, sp)
-        # 既存内容に1行追加（複数指定できるように）
-        cur = self.stageEdit.toPlainText().strip()
-        self.stageEdit.setPlainText((cur + "\n" + sub).strip() if cur else sub)
+        self._add_subpath_row(sub, "")   # 表に1行追加
 
     @staticmethod
     def _derive_subpath(picked, shots_parent):
@@ -3745,7 +3794,9 @@ class ProjectSettingsDialog(QDialog):
         self.nameEdit.setText(entry.get("name", ""))
         self.rootEdit.setText(entry.get("path", ""))
         self.shotsEdit.setText(entry.get("shots_parent", ""))
-        self.stageEdit.setPlainText(entry.get("stage_subpath", ""))
+        self.subpathTable.setRowCount(0)
+        for pat, nm in _parse_subpath_items(entry.get("stage_subpath", "")):
+            self._add_subpath_row(pat, nm)
         self.labelEdit.setText(entry.get("subpath_label", ""))
         self.stageTable.setRowCount(0)
         for st in entry.get("stages", []) or []:
@@ -3796,7 +3847,7 @@ class ProjectSettingsDialog(QDialog):
             "path": self.rootEdit.text().strip(),
             "shots_parent": self.shotsEdit.text().strip() or self.rootEdit.text().strip(),
             # 複数行＝複数サブパス。全体の前後空白だけ除去（各行は展開側で処理）。
-            "stage_subpath": self.stageEdit.toPlainText().strip(),
+            "stage_subpath": self._subpaths_from_table(),
             "subpath_label": self.labelEdit.text().strip(),
             "stages": self._stages_from_table(),
         }
