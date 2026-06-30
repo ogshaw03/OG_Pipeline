@@ -2726,10 +2726,13 @@ class ColumnBrowser(QWidget):
                 self.file_selected.emit(self._file_info(path))
                 break
 
-        # 末尾カラムが見えるよう右へスクロール
+        # 末尾カラムが見えるよう右へスクロールし、フォーカスもそのカラムへ移す。
+        # （保存処理で一覧を作り直すとフォーカスが検索欄へ飛ぶのを防ぐ）
         if self._columns:
             last = self._columns[-1]._container
+            last_list = self._columns[-1]
             QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(last))
+            QTimer.singleShot(0, lambda: last_list.setFocus())
         return True
 
     @staticmethod
