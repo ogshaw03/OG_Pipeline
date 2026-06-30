@@ -18,6 +18,7 @@ import os
 import sys
 import re
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -295,6 +296,148 @@ def _find_mayapy():
         if os.path.isfile(c):
             return c
     return None
+
+
+def _find_maya_batch():
+    """バッチ実行用の Maya 実行ファイルを返す。(path, is_batch_exe) or (None, False)。
+
+    mayabatch(.exe) があればそれを優先（is_batch_exe=True）。
+    無ければ maya(.exe) を使い、呼び出し側で -batch を付ける（is_batch_exe=False）。
+    """
+    d = os.path.dirname(sys.executable)
+    search = [d, os.path.join(d, "bin")]
+    for base in search:
+        for name in ("mayabatch.exe", "mayabatch"):
+            c = os.path.join(base, name)
+            if os.path.isfile(c):
+                return c, True
+    for base in search:
+        for name in ("maya.exe", "maya"):
+            c = os.path.join(base, name)
+            if os.path.isfile(c):
+                return c, False
+    return None, False
+
+
+def _hw_worker_source(scene_path, seq_dir, stem):
+    """別プロセス(mayabatch)内で実行するハードウェアレンダー用ワーカースクリプト。
+
+    Viewport 2.0（mayaHardware2）で再生範囲を連番JPEGに書き出し、
+    Pipeline_Movie/<stem>/ に <stem>.####.jpg として保存する。
+    成否は seq_dir 内の _oghw_log.txt に記録する。
+    """
+    # パスはリテラルとして安全に埋め込む（repr でエスケープ）
+    return (
+        "import os, shutil, traceback\n"
+        "import maya.cmds as cmds\n"
+        "SCENE = %r\n"
+        "SEQ_DIR = %r\n"
+        "STEM = %r\n"
+        "log = []\n"
+        "def w(m):\n"
+        "    log.append(str(m))\n"
+        "try:\n"
+        "    if not os.path.isdir(SEQ_DIR):\n"
+        "        os.makedirs(SEQ_DIR)\n"
+        "    try:\n"
+        "        start = int(cmds.playbackOptions(q=True, min=True))\n"
+        "        end = int(cmds.playbackOptions(q=True, max=True))\n"
+        "    except Exception:\n"
+        "        start, end = 1, 1\n"
+        "    try:\n"
+        "        wdt = int(cmds.getAttr('defaultResolution.width')) or 1280\n"
+        "        hgt = int(cmds.getAttr('defaultResolution.height')) or 720\n"
+        "    except Exception:\n"
+        "        wdt, hgt = 1280, 720\n"
+        "    try:\n"
+        "        cmds.setAttr('defaultRenderGlobals.currentRenderer', 'mayaHardware2', type='string')\n"
+        "    except Exception as e:\n"
+        "        w('renderer set failed: %%s' %% e)\n"
+        "    try:\n"
+        "        cmds.setAttr('defaultRenderGlobals.imageFormat', 8)\n"  # 8 = JPEG
+        "    except Exception:\n"
+        "        pass\n"
+        "    made = 0\n"
+        "    for f in range(start, end + 1):\n"
+        "        try:\n"
+        "            cmds.currentTime(f)\n"
+        "            out = cmds.ogsRender(width=wdt, height=hgt, currentFrame=True)\n"
+        "            src = out[0] if isinstance(out, (list, tuple)) and out else out\n"
+        "            if src and os.path.isfile(src):\n"
+        "                dst = os.path.join(SEQ_DIR, '%%s.%%04d.jpg' %% (STEM, f))\n"
+        "                shutil.copy2(src, dst)\n"
+        "                made += 1\n"
+        "            else:\n"
+        "                w('frame %%d: no output (%%s)' %% (f, src))\n"
+        "        except Exception as e:\n"
+        "            w('frame %%d error: %%s' %% (f, e))\n"
+        "    w('done: %%d/%%d frames -> %%s' %% (made, end - start + 1, SEQ_DIR))\n"
+        "except Exception:\n"
+        "    w(traceback.format_exc())\n"
+        "finally:\n"
+        "    try:\n"
+        "        with open(os.path.join(SEQ_DIR, '_oghw_log.txt'), 'w') as fh:\n"
+        "            fh.write('\\n'.join(log))\n"
+        "    except Exception:\n"
+        "        pass\n"
+    ) % (scene_path, seq_dir, stem)
+
+
+def export_hardware_background(scene_path):
+    """別プロセス(mayabatch)でハードウェアレンダー書き出しをバックグラウンド起動する。
+
+    現在の Maya セッションをブロックしない（Popen して即 return）。
+    戻り値: (ok, message)。ok=True は「起動できた」を意味し、完了は意味しない。
+    """
+    batch_exe, is_batch = _find_maya_batch()
+    if not batch_exe:
+        return False, "mayabatch / maya 実行ファイルが見つかりませんでした。"
+    if not scene_path or not os.path.isfile(scene_path):
+        return False, "シーンファイルが見つかりません（保存後に実行してください）。"
+
+    stem = Path(scene_path).stem
+    seq_dir = os.path.join(os.path.dirname(scene_path), VIDEO_SUBDIR, stem)
+    try:
+        if os.path.isdir(seq_dir):
+            shutil.rmtree(seq_dir, ignore_errors=True)
+        os.makedirs(seq_dir, exist_ok=True)
+    except Exception as e:
+        return False, "出力フォルダを作成できませんでした: %s" % e
+
+    # ワーカースクリプトをスクラッチに書き出す
+    worker_dir = get_config_dir()
+    worker_py = os.path.join(worker_dir, "_oghw_worker.py")
+    try:
+        with open(worker_py, "w", encoding="utf-8") as fh:
+            fh.write(_hw_worker_source(scene_path, seq_dir, stem))
+    except Exception as e:
+        return False, "ワーカースクリプトを書き出せませんでした: %s" % e
+
+    # MEL の -command から python ワーカーを実行する
+    mel_cmd = 'python("import runpy; runpy.run_path(r\'%s\')")' % worker_py.replace("\\", "/")
+    args = [batch_exe]
+    if not is_batch:
+        args.append("-batch")
+    args += ["-file", scene_path, "-command", mel_cmd]
+
+    # Windows ではコンソール窓を出さない
+    kwargs = {}
+    try:
+        if sys.platform.startswith("win"):
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0  # SW_HIDE
+            kwargs["startupinfo"] = si
+            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    except Exception:
+        pass
+
+    try:
+        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         **kwargs)
+    except Exception as e:
+        return False, "バックグラウンド起動に失敗しました: %s" % e
+    return True, "バックグラウンドで書き出し中… 完了後に [↻ REFRESH] で更新してください（出力: %s）" % seq_dir
 
 
 def install_opencv():
@@ -587,6 +730,24 @@ def clear_startup_root():
     if "startup_root" in cfg:
         cfg.pop("startup_root", None)
         _write_config(cfg)
+
+
+# 動画書き出し方式: "playblast"（同一セッションでビューを撮る）/
+#                    "hardware"（別 mayabatch プロセスでハードウェアレンダー＝バックグラウンド）
+EXPORT_METHODS = ("playblast", "hardware")
+
+
+def get_export_method():
+    m = _read_config().get("export_method")
+    return m if m in EXPORT_METHODS else "playblast"
+
+
+def set_export_method(method):
+    if method not in EXPORT_METHODS:
+        return
+    cfg = _read_config()
+    cfg["export_method"] = method
+    _write_config(cfg)
 
 
 def reveal_in_explorer(path):
@@ -2693,10 +2854,23 @@ class OGPipelineWindow(QWidget):
         self.versionUpBtn.clicked.connect(self._version_up_save)
         ab_layout.addWidget(self.versionUpBtn)
 
-        # 現在シーンを movies フォルダにプレイブラスト書き出し
-        self.playblastBtn = QPushButton("🎬  PLAYBLAST")
+        # 書き出し方式の選択（プレイブラスト / ハードウェア＝バックグラウンド）
+        self.exportMethodCombo = QComboBox()
+        self.exportMethodCombo.addItem("プレイブラスト", "playblast")
+        self.exportMethodCombo.addItem("ハードウェア(裏)", "hardware")
+        self.exportMethodCombo.setToolTip(
+            "プレイブラスト: 現在のビューを撮る（一瞬画面が止まる）\n"
+            "ハードウェア(裏): 別プロセスでレンダー（手元を止めない／画面に出ない）")
+        idx = self.exportMethodCombo.findData(get_export_method())
+        if idx >= 0:
+            self.exportMethodCombo.setCurrentIndex(idx)
+        self.exportMethodCombo.activated.connect(self._on_export_method_changed)
+        ab_layout.addWidget(self.exportMethodCombo)
+
+        # 現在シーンを movies フォルダに書き出し（方式は上のプルダウンに従う）
+        self.playblastBtn = QPushButton("🎬  動画書き出し")
         self.playblastBtn.setObjectName("refreshBtn")
-        self.playblastBtn.setToolTip("現在のシーンを movies フォルダにシーン名と同名で書き出す")
+        self.playblastBtn.setToolTip("現在のシーンを Pipeline_Movie にシーン名と同名で書き出す")
         self.playblastBtn.clicked.connect(self._playblast_current)
         ab_layout.addWidget(self.playblastBtn)
 
@@ -3420,19 +3594,35 @@ class OGPipelineWindow(QWidget):
         # 現在のルート配下なら一覧を更新して新バージョンを反映
         self._apply_view()
 
+    def _on_export_method_changed(self, _idx):
+        method = self.exportMethodCombo.currentData() or "playblast"
+        set_export_method(method)
+        if method == "hardware":
+            self.statusLabel.setText("書き出し方式: ハードウェア（別プロセスで裏で書き出し）")
+        else:
+            self.statusLabel.setText("書き出し方式: プレイブラスト（現在のビューを撮影）")
+
     def _playblast_current(self):
-        """現在 Maya で開いているシーンをプレイブラスト書き出しする。"""
+        """現在 Maya で開いているシーンを、選択中の方式で動画書き出しする。"""
         try:
             import maya.cmds as cmds
             cur = cmds.file(q=True, sceneName=True) or ""
         except ImportError:
             QMessageBox.information(
-                self, "プレイブラスト",
-                "Maya 内で実行すると、現在のシーンを movies フォルダに書き出します。",
+                self, "動画書き出し",
+                "Maya 内で実行すると、現在のシーンを Pipeline_Movie に書き出します。",
             )
             return
         if not cur:
             self.statusLabel.setText("現在のシーンが未保存です（書き出し先がありません）")
+            return
+
+        method = self.exportMethodCombo.currentData() or "playblast"
+        if method == "hardware":
+            ok, msg = export_hardware_background(cur)
+            self.statusLabel.setText(("🎬  " if ok else "⚠  ") + msg)
+            if not ok:
+                QMessageBox.warning(self, "ハードウェア書き出し", msg)
             return
         self._playblast(cur)
 
