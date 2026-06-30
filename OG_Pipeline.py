@@ -1949,11 +1949,28 @@ class AllShotsDialog(QDialog):
         hl.addWidget(title)
         hl.addStretch()
         hl.addWidget(QLabel("表示:"))
-        self._viewCombo = QComboBox()
-        self._viewCombo.addItem("グリッド", "grid")
-        self._viewCombo.addItem("リスト", "list")
-        self._viewCombo.activated.connect(self._on_view_changed)
-        hl.addWidget(self._viewCombo)
+        # 表示切替スイッチ（グリッド / リスト）。プルダウンではなく2ボタンで選択。
+        sw_style = (
+            "QToolButton { background: #141824; color: #6b7794; border: 1px solid #2a3045;"
+            " padding: 4px 10px; font-size: 14px; }"
+            "QToolButton:hover { color: #e8c87a; }"
+            "QToolButton:checked { background: #2a2010; color: #e8a838;"
+            " border: 1px solid #e8a838; }")
+        self.gridBtn = QToolButton()
+        self.gridBtn.setText("▦")        # 四角が並んだタイル表示
+        self.gridBtn.setCheckable(True)
+        self.gridBtn.setChecked(True)
+        self.gridBtn.setToolTip("グリッド表示")
+        self.gridBtn.setStyleSheet(sw_style)
+        self.gridBtn.clicked.connect(lambda: self._set_view_mode("grid"))
+        self.listBtn = QToolButton()
+        self.listBtn.setText("≡")        # 縦並びリスト表示
+        self.listBtn.setCheckable(True)
+        self.listBtn.setToolTip("リスト表示")
+        self.listBtn.setStyleSheet(sw_style)
+        self.listBtn.clicked.connect(lambda: self._set_view_mode("list"))
+        hl.addWidget(self.gridBtn)
+        hl.addWidget(self.listBtn)
         hl.addSpacing(12)
         hl.addWidget(QLabel("並び替え:"))
         self._sortCombo = QComboBox()
@@ -2090,8 +2107,10 @@ class AllShotsDialog(QDialog):
         return "", None
 
     # ── 表示モード・ソート ──────────────────────────────
-    def _on_view_changed(self, _idx):
-        self._view_mode = self._viewCombo.currentData() or "grid"
+    def _set_view_mode(self, mode):
+        self._view_mode = mode
+        self.gridBtn.setChecked(mode == "grid")
+        self.listBtn.setChecked(mode == "list")
         self._rebuild()
 
     def _on_sort_changed(self, text):
