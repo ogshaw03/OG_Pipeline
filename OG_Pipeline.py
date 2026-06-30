@@ -539,6 +539,7 @@ def apply_stage_rename(stem, stage, all_stages=None):
     見つからなければ、対象工程の「リネーム元→リネーム先」でフォールバックする。
     テイク/ローカルは欄に数字が入っているときだけ、その値で初期化する（空欄なら据え置き）。
     採番対象の接頭辞は各工程のテイク/ローカル欄から導く（_t## 固定でなく汎用）。
+    戻り値: (新stem, replaced)。replaced は工程トークンの置換が行われたか。
     """
     new = stem
     target = (stage.get("rename_to") or stage.get("name") or "").strip()
@@ -561,6 +562,7 @@ def apply_stage_rename(stem, stage, all_stages=None):
         rf = stage.get("rename_from", "")
         if rf and target and rf in new:
             new = new.replace(rf, target)
+            replaced = True
 
     # テイク/ローカルは「数字入りの値」が入っている工程のときだけ初期化する。
     if re.search(r"\d", stage.get("take") or ""):
@@ -569,7 +571,7 @@ def apply_stage_rename(stem, stage, all_stages=None):
     if re.search(r"\d", stage.get("local") or ""):
         local_re = version_token_re(all_stages, "local", DEFAULT_LOCAL_PREFIX)
         new, _ = set_version_token(new, local_re, stage["local"])
-    return new
+    return new, replaced
 
 
 
@@ -1503,6 +1505,7 @@ class VideoPlayer(QWidget):
         # 連番画像のフリップブック再生用
         self._frames = []
         self._idx = 0
+        self._seq_fps = 24
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._next_frame)
         # cv2 による mp4 再生用（バックグラウンドデコード）
@@ -1600,6 +1603,7 @@ class VideoPlayer(QWidget):
         self._path = None
         self._frames = list(frames or [])
         self._idx = 0
+        self._seq_fps = max(1, int(fps or 24))
         self._openBtn.hide()
         if not self._frames:
             self.clear_player()
@@ -1700,6 +1704,19 @@ class VideoPlayer(QWidget):
 
     def stop(self):
         self._stop_all()
+
+    def suspend(self):
+        """再生を止めて cv2 等のファイルロックを解放する（_path/_frames は保持）。"""
+        self._stop_all()
+
+    def resume(self):
+        """suspend 後、保持している動画/連番の再生を再開する。"""
+        if self._path and _HAS_CV2:
+            self._got_frame = False
+            self._video_token += 1
+            self._start_cv2(self._path)
+        elif self._frames and len(self._frames) > 1:
+            self._timer.start(max(1, int(1000 / max(1, self._seq_fps))))
 
 
 # ─── 全ショット動画一覧（グリッド・自動再生） ───────────────────────────────────
@@ -2201,6 +2218,20 @@ class AllShotsDialog(QDialog):
         hl.addWidget(self._sizeSlider)
         hl.addSpacing(12)
 
+        # 再生停止トグル（削除可）。ON にすると全再生を止めてファイルロックを解放するので、
+        # ショットリストをアクティブにしたままエクスプローラーで削除/移動できる。
+        self._playback_suspended = False
+        self.pauseAllBtn = QToolButton()
+        self.pauseAllBtn.setText("⏸ 再生停止")
+        self.pauseAllBtn.setCheckable(True)
+        self.pauseAllBtn.setToolTip(
+            "再生を止めて動画ファイルのロックを解放します。\n"
+            "ON の間はこのウィンドウを開いたままでも外部で削除/移動できます。")
+        self.pauseAllBtn.setStyleSheet(sw_style)
+        self.pauseAllBtn.toggled.connect(self._on_toggle_pause_all)
+        hl.addWidget(self.pauseAllBtn)
+        hl.addSpacing(12)
+
         hl.addWidget(QLabel("並び替え:"))
         self._sortCombo = QComboBox()
         self._sortCombo.addItems(["ショット名", "工程"])
@@ -2683,9 +2714,20 @@ class AllShotsDialog(QDialog):
     def _all_cells(self):
         return self._cells + self._side_cells
 
+    def _on_toggle_pause_all(self, checked):
+        """再生停止トグル。ON=全停止しロック解放（削除可）、OFF=表示中を再開。"""
+        self._playback_suspended = bool(checked)
+        self.pauseAllBtn.setText("▶ 再生再開" if checked else "⏸ 再生停止")
+        if checked:
+            self.stop_all()
+        else:
+            self._update_visible()
+
     def _update_visible(self, *args):
         if not self.isVisible():
             return
+        if getattr(self, "_playback_suspended", False):
+            return   # 手動停止中（削除可モード）は再生しない
         for cell in self._all_cells():
             try:
                 visible = not cell.visibleRegion().isEmpty()
@@ -4559,6 +4601,23 @@ class OGPipelineWindow(QWidget):
         else:
             self.statusLabel.setText("▸  %s" % folder)
 
+    def changeEvent(self, event):
+        # ウィンドウが非アクティブ（エクスプローラー等へ切替）になったら詳細パネルの
+        # 動画再生を止めてファイルの OS ロックを解放する → 外部で削除/移動できる。
+        # アクティブ復帰時は再生を再開する。手動停止中（_playback_suspended）は再開しない。
+        try:
+            if event.type() == QtCore.QEvent.ActivationChange:
+                vp = getattr(getattr(self, "detailPanel", None), "video", None)
+                if vp is not None:
+                    if self.isActiveWindow():
+                        if not getattr(self, "_playback_suspended", False):
+                            vp.resume()
+                    else:
+                        vp.suspend()
+        except Exception:
+            pass
+        super().changeEvent(event)
+
     def closeEvent(self, event):
         """ウィンドウを閉じる際、実行中のデコード/検索スレッドを確実に止める。
 
@@ -5600,7 +5659,19 @@ class OGPipelineWindow(QWidget):
         target_dir = resolve_stage_dir(stage, shot_folder, self.active_stage_subpath)
         stem = os.path.splitext(os.path.basename(cur))[0]
         # 現シーン名基準のトークン置換（リネーム元→リネーム先 ＋ 初期テイク/ローカル）
-        new_stem = apply_stage_rename(stem, stage, stages)
+        new_stem, replaced = apply_stage_rename(stem, stage, stages)
+        if not replaced:
+            rf = (stage.get("rename_from") or stage.get("rename_to")
+                  or stage.get("name") or "").strip()
+            QMessageBox.warning(
+                self, "別工程へ保存",
+                "リネーム元の文字列が現在のシーン名に見つかりませんでした。\n"
+                "保存を中断しました。\n\n"
+                "シーン名: %s\nリネーム元: %s\n\n"
+                "工程設定の『リネーム元』が現在のシーン名に含まれているか"
+                "（大文字小文字も含め）確認してください。"
+                % (stem, rf or "（未設定）"))
+            return
         saved = self._save_renamed(target_dir, new_stem, cmds)
         if saved:
             self.statusLabel.setText(
