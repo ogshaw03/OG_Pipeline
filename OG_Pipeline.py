@@ -1043,7 +1043,7 @@ class GridVideoCell(QWidget):
 
     def __init__(self, title, media, stage="", on_click=None, payload=None,
                  title_color=None, folder=None, on_drill=None,
-                 drill_label="⮞ 工程フォルダを開く", parent=None):
+                 drill_label="⮞ この工程へ移動", parent=None):
         super().__init__(parent)
         self.setFixedWidth(self.CELL_W)
         self.setObjectName("gridCell")
