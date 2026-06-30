@@ -4204,8 +4204,10 @@ class OGPipelineWindow(QWidget):
         mrow.addWidget(mlab)
         self.exportMethodCombo = QComboBox()
         self.exportMethodCombo.setFixedHeight(26)
+        self.exportMethodCombo.setMinimumWidth(180)
         self.exportMethodCombo.setStyleSheet(
-            "QComboBox { font-size: 11px; min-height: 0; padding: 2px 8px; }")
+            "QComboBox { font-size: 11px; min-height: 0; padding: 2px 8px; }"
+            " QComboBox QAbstractItemView { min-width: 180px; }")
         self.exportMethodCombo.addItem("プレイブラスト", "playblast")
         self.exportMethodCombo.addItem("ハードウェア(裏)", "hardware")
         self.exportMethodCombo.setToolTip(
