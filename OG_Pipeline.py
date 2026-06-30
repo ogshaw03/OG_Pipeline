@@ -18,6 +18,7 @@ import os
 import sys
 import re
 import json
+import time
 import shutil
 import subprocess
 from pathlib import Path
@@ -32,7 +33,7 @@ try:
         QSplitter, QFrame, QScrollArea, QComboBox, QMessageBox,
         QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
         QListWidget, QListWidgetItem, QInputDialog, QMenu,
-        QDialog, QDialogButtonBox, QGridLayout, QCheckBox
+        QDialog, QDialogButtonBox, QGridLayout, QCheckBox, QSpinBox, QFormLayout
     )
 except ImportError:
     try:
@@ -45,7 +46,7 @@ except ImportError:
             QSplitter, QFrame, QScrollArea, QComboBox, QMessageBox,
             QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
             QListWidget, QListWidgetItem, QInputDialog, QMenu,
-            QDialog, QDialogButtonBox, QGridLayout, QCheckBox
+            QDialog, QDialogButtonBox, QGridLayout, QCheckBox, QSpinBox, QFormLayout
         )
     except ImportError:
         raise ImportError("PySide2 または PySide6 が必要です。")
@@ -747,6 +748,34 @@ def set_export_method(method):
         return
     cfg = _read_config()
     cfg["export_method"] = method
+    _write_config(cfg)
+
+
+def get_auto_export_on_save():
+    """シーン保存のたびに動画を自動更新するか。"""
+    return bool(_read_config().get("auto_export_on_save", False))
+
+
+def set_auto_export_on_save(value):
+    cfg = _read_config()
+    cfg["auto_export_on_save"] = bool(value)
+    _write_config(cfg)
+
+
+def get_auto_export_interval_min():
+    """自動書き出しの最小間隔（分）。前回更新からこの分数未満なら書き出さない。"""
+    try:
+        return max(0, int(_read_config().get("auto_export_interval_min", 1)))
+    except Exception:
+        return 1
+
+
+def set_auto_export_interval_min(minutes):
+    cfg = _read_config()
+    try:
+        cfg["auto_export_interval_min"] = max(0, int(minutes))
+    except Exception:
+        cfg["auto_export_interval_min"] = 1
     _write_config(cfg)
 
 
@@ -2480,6 +2509,70 @@ class ReferenceEditDialog(QDialog):
         return sum(1 for r in self._rows if r["remove"].isChecked())
 
 
+# ─── 環境設定ダイアログ ───────────────────────────────────────────────────────
+class SettingsDialog(QDialog):
+    """書き出し方式・保存時の自動更新・自動更新の最小間隔を設定する。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("環境設定")
+        self.setStyleSheet(STYLE)
+        self.setMinimumWidth(440)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setSpacing(12)
+
+        title = QLabel("◈  環境設定")
+        title.setStyleSheet("font-size: 14px; color: #e8a838; letter-spacing: 1px;")
+        outer.addWidget(title)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        # 書き出し方式
+        self.methodCombo = QComboBox()
+        self.methodCombo.addItem("プレイブラスト（現在のビューを撮影）", "playblast")
+        self.methodCombo.addItem("ハードウェア（別プロセスで裏で書き出し）", "hardware")
+        idx = self.methodCombo.findData(get_export_method())
+        if idx >= 0:
+            self.methodCombo.setCurrentIndex(idx)
+        form.addRow("動画の書き出し方式:", self.methodCombo)
+
+        # 保存のたびに自動更新
+        self.autoCheck = QCheckBox("シーンを保存するたびに動画を更新する")
+        self.autoCheck.setChecked(get_auto_export_on_save())
+        form.addRow("自動更新:", self.autoCheck)
+
+        # 最小間隔（分）
+        self.intervalSpin = QSpinBox()
+        self.intervalSpin.setRange(0, 600)
+        self.intervalSpin.setSuffix(" 分")
+        self.intervalSpin.setValue(get_auto_export_interval_min())
+        self.intervalSpin.setToolTip(
+            "前回の動画更新からこの分数以上経過しているときだけ書き出します（0=毎回）。")
+        form.addRow("最小間隔:", self.intervalSpin)
+
+        outer.addLayout(form)
+
+        hint = QLabel("※ 自動更新は「保存のたび」に判定し、最後の更新から指定分数未満なら"
+                      "スキップします。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #4a5568; font-size: 10px;")
+        outer.addWidget(hint)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        outer.addWidget(btns)
+
+    def save(self):
+        """設定を永続化する。"""
+        set_export_method(self.methodCombo.currentData() or "playblast")
+        set_auto_export_on_save(self.autoCheck.isChecked())
+        set_auto_export_interval_min(self.intervalSpin.value())
+
+
 # ─── メインウィンドウ ─────────────────────────────────────────────────────────
 class OGPipelineWindow(QWidget):
     """
@@ -2501,6 +2594,8 @@ class OGPipelineWindow(QWidget):
         self._loading_combo = False
         self.active_root = None
         self.active_shots_parent = None
+        self._last_export_at = {}    # {正規化シーンパス: 最終書き出し time.time()}
+        self._save_job = None        # SceneSaved scriptJob の ID
 
         self.setStyleSheet(STYLE)
         self._build_ui()
@@ -2516,6 +2611,81 @@ class OGPipelineWindow(QWidget):
         self._sceneTimer = QTimer(self)
         self._sceneTimer.timeout.connect(self._update_current_scene_label)
         self._sceneTimer.start(1500)
+
+        # 保存時の自動書き出し（SceneSaved を監視。判定は実行時に設定を読む）
+        self._register_save_job()
+
+    def _register_save_job(self):
+        """Maya の SceneSaved イベントを監視する scriptJob を登録する。"""
+        try:
+            import maya.cmds as cmds
+        except Exception:
+            return
+        try:
+            self._save_job = cmds.scriptJob(
+                event=["SceneSaved", self._on_scene_saved], protected=False)
+        except Exception as e:
+            print("[OG_Pipeline] SceneSaved scriptJob 登録失敗:", e)
+
+    def _kill_save_job(self):
+        if self._save_job is None:
+            return
+        try:
+            import maya.cmds as cmds
+            if cmds.scriptJob(exists=self._save_job):
+                cmds.scriptJob(kill=self._save_job, force=True)
+        except Exception:
+            pass
+        self._save_job = None
+
+    def _existing_output_mtime(self, scene_path):
+        """既存の出力（連番/動画）の最新 mtime。無ければ None。"""
+        times = []
+        try:
+            frames = find_scene_sequence(scene_path)
+            if frames:
+                times.append(max(os.path.getmtime(f) for f in frames))
+        except Exception:
+            pass
+        try:
+            vid = find_scene_video(scene_path)
+            if vid:
+                times.append(os.path.getmtime(vid))
+        except Exception:
+            pass
+        return max(times) if times else None
+
+    def _on_scene_saved(self):
+        """シーン保存時に呼ばれる。設定が ON かつ最小間隔を満たすときだけ書き出す。"""
+        if not get_auto_export_on_save():
+            return
+        try:
+            import maya.cmds as cmds
+            cur = cmds.file(q=True, sceneName=True) or ""
+        except Exception:
+            cur = ""
+        if not cur:
+            return
+        interval = get_auto_export_interval_min() * 60.0
+        now = time.time()
+        key = os.path.normcase(os.path.normpath(cur))
+        last = self._last_export_at.get(key)
+        if last is None:
+            last = self._existing_output_mtime(cur)   # セッションをまたいでも判定できる
+        if interval > 0 and last is not None and (now - last) < interval:
+            remain = int((interval - (now - last)) / 60) + 1
+            self.statusLabel.setText(
+                "自動書き出しをスキップ（前回更新から%d分未満／あと約%d分）"
+                % (get_auto_export_interval_min(), remain))
+            return
+        self._last_export_at[key] = now
+        method = get_export_method()
+        if method == "hardware":
+            ok, msg = export_hardware_background(cur)
+            self.statusLabel.setText(("🎬 自動: " if ok else "⚠ 自動: ") + msg)
+        else:
+            self.statusLabel.setText("🎬 自動プレイブラスト中…")
+            self._playblast(cur)
 
     def _update_current_scene_label(self):
         """ヘッダー中央に現在開いている Maya シーン名を表示する。"""
@@ -2666,7 +2836,28 @@ class OGPipelineWindow(QWidget):
         layout.addWidget(self.enableMp4Btn)
 
         layout.addStretch()
+
+        # 右上: 環境設定（書き出し方式・保存時の自動更新など）
+        self.settingsBtn = QPushButton("🛠  環境設定")
+        self.settingsBtn.setObjectName("refreshBtn")
+        self.settingsBtn.setToolTip("書き出し方式・保存時の動画自動更新などを設定")
+        self.settingsBtn.clicked.connect(self._open_settings)
+        layout.addWidget(self.settingsBtn)
         return bar
+
+    def _open_settings(self):
+        dlg = SettingsDialog(self)
+        if dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec():
+            dlg.save()
+            # ファイル操作バーの方式プルダウンを設定に同期
+            idx = self.exportMethodCombo.findData(get_export_method())
+            if idx >= 0:
+                self.exportMethodCombo.setCurrentIndex(idx)
+            self.statusLabel.setText(
+                "環境設定を保存しました（方式: %s ／ 自動更新: %s ／ 最小間隔: %d分）"
+                % (get_export_method(),
+                   "ON" if get_auto_export_on_save() else "OFF",
+                   get_auto_export_interval_min()))
 
     def _open_all_shots(self):
         if not self.active_shots_parent or not os.path.isdir(str(self.active_shots_parent)):
@@ -2716,6 +2907,7 @@ class OGPipelineWindow(QWidget):
             self._sceneTimer.stop()
         except Exception:
             pass
+        self._kill_save_job()
         try:
             self.detailPanel.video.stop()
         except Exception:
@@ -3617,6 +3809,8 @@ class OGPipelineWindow(QWidget):
             self.statusLabel.setText("現在のシーンが未保存です（書き出し先がありません）")
             return
 
+        # 手動書き出しも自動更新のスロットル基準時刻に反映する
+        self._last_export_at[os.path.normcase(os.path.normpath(cur))] = time.time()
         method = self.exportMethodCombo.currentData() or "playblast"
         if method == "hardware":
             ok, msg = export_hardware_background(cur)
