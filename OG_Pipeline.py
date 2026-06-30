@@ -4203,11 +4203,11 @@ class OGPipelineWindow(QWidget):
         mlab.setStyleSheet("font-size: 11px;")
         mrow.addWidget(mlab)
         self.exportMethodCombo = QComboBox()
-        self.exportMethodCombo.setFixedHeight(26)
         self.exportMethodCombo.setMinimumWidth(180)
+        # 既定の QComboBox スタイル（min-height:28 / padding:4 8）に任せて
+        # テキストが切れないようにする。ポップアップ一覧だけ幅を確保。
         self.exportMethodCombo.setStyleSheet(
-            "QComboBox { font-size: 11px; min-height: 0; padding: 2px 8px; }"
-            " QComboBox QAbstractItemView { min-width: 180px; }")
+            "QComboBox QAbstractItemView { min-width: 180px; }")
         self.exportMethodCombo.addItem("プレイブラスト", "playblast")
         self.exportMethodCombo.addItem("ハードウェア(裏)", "hardware")
         self.exportMethodCombo.setToolTip(
