@@ -2095,34 +2095,42 @@ class AllShotsDialog(QDialog):
             names = sorted(os.listdir(shots_parent))
         except Exception:
             names = []
+        has_subpath = bool((self._stage_subpath or "").strip())
         for d in names:
             full = os.path.join(shots_parent, d)
             if not os.path.isdir(full):
                 continue
-            # サブパスの一つ下（例: モーション）ごとに 1 タイル＝そのフォルダの最新動画。
-            units = self._shot_stage_dirs(full)
-            added = False
-            for label, udir in units:
-                if not udir or not os.path.isdir(udir):
-                    continue
-                media = pick_folder_media(udir)
-                if media:
-                    self._shot_data.append(
-                        {"name": "%s / %s" % (d, label), "folder": udir,
-                         "media": media, "stage": label, "shot": d})
-                    added = True
-            # 一つ下に該当が無いショットは、ショット自体の最新でフォールバック
-            if not added:
+            if has_subpath:
+                # サブパス設定あり → 一つ下（例: モーション）ごとに 1 タイル＝最新動画
+                added = False
+                for label, udir in self._shot_stage_dirs(full):
+                    if not udir or not os.path.isdir(udir):
+                        continue
+                    media = pick_folder_media(udir)
+                    if media:
+                        self._shot_data.append(
+                            {"name": "%s / %s" % (d, label), "folder": udir,
+                             "media": media, "stage": label, "shot": d})
+                        added = True
+                if not added:   # 一つ下に該当が無ければショット最新でフォールバック
+                    stage_name, media = self._shot_latest(full)
+                    if media:
+                        self._shot_data.append(
+                            {"name": d, "folder": full, "media": media,
+                             "stage": stage_name, "shot": d})
+            else:
+                # サブパス未設定 → 従来どおりショットごとに最新 1 つ
                 stage_name, media = self._shot_latest(full)
-                if media:
+                if media or stage_name:
                     self._shot_data.append(
                         {"name": d, "folder": full, "media": media,
                          "stage": stage_name, "shot": d})
 
         nshots = len({s.get("shot") for s in self._shot_data})
+        note = ("サブパスの一つ下＝モーション単位の最新動画" if has_subpath
+                else "ショットごとの最新動画")
         self._foot.setText(
-            f"{len(self._shot_data)} 件 / {nshots} ショット　"
-            "（サブパスの一つ下＝モーション単位の最新動画／表示中のみ再生）")
+            f"{len(self._shot_data)} 件 / {nshots} ショット　（{note}／表示中のみ再生）")
         self._rebuild()
 
     # ── 工程の解決（工程設定があれば優先） ─────────────────
