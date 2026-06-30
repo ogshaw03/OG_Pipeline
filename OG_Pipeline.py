@@ -33,7 +33,8 @@ try:
         QSplitter, QFrame, QScrollArea, QComboBox, QMessageBox,
         QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
         QListWidget, QListWidgetItem, QInputDialog, QMenu,
-        QDialog, QDialogButtonBox, QGridLayout, QCheckBox, QSpinBox, QFormLayout
+        QDialog, QDialogButtonBox, QGridLayout, QCheckBox, QSpinBox, QFormLayout,
+        QStackedWidget, QPlainTextEdit
     )
 except ImportError:
     try:
@@ -471,6 +472,31 @@ def install_opencv():
         return (ok and _HAS_CV2), log
     except Exception as e:
         return False, str(e)
+
+
+def uninstall_opencv():
+    """opencv-python(-headless) を pip でアンインストールする。戻り値: (成功, ログ)。
+
+    既に import 済みの cv2 は現セッションでは解放されないため、無効化は
+    Maya 再起動後に反映される（呼び出し側で案内する）。
+    """
+    exe = _find_mayapy()
+    if not exe:
+        return False, "mayapy が見つかりませんでした。手動で `mayapy -m pip uninstall -y opencv-python-headless` を実行してください。"
+    logs, ok_any = [], False
+    for pkg in ("opencv-python-headless", "opencv-python"):
+        try:
+            proc = subprocess.run(
+                [exe, "-m", "pip", "uninstall", "-y", pkg],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600,
+            )
+            out = (proc.stdout or b"").decode("utf-8", "replace")[-1000:]
+            logs.append("$ pip uninstall %s\n%s" % (pkg, out))
+            if proc.returncode == 0 and "not installed" not in out.lower():
+                ok_any = True
+        except Exception as e:
+            logs.append("%s: %s" % (pkg, e))
+    return ok_any, "\n".join(logs)
 
 
 class Cv2VideoThread(QThread):
@@ -2734,40 +2760,76 @@ class ProjectSettingsDialog(QDialog):
 
 # ─── 環境設定ダイアログ ───────────────────────────────────────────────────────
 class SettingsDialog(QDialog):
-    """書き出し方式・保存時の自動更新・自動更新の最小間隔を設定する。"""
+    """左サイドバーでセクションを切り替える環境設定。
+
+    セクション:
+      - 動画書き出し … 書き出し方式 / 保存時の自動更新 / 最小間隔
+      - mp4 有効化   … cv2 のインストール / アンインストール
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("環境設定")
         self.setStyleSheet(STYLE)
-        self.setMinimumWidth(440)
+        self.setMinimumSize(680, 420)
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 14, 16, 14)
-        outer.setSpacing(12)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        title = QLabel("◈  環境設定")
+        # 左: セクション選択サイドバー
+        self.nav = QListWidget()
+        self.nav.setFixedWidth(170)
+        self.nav.setObjectName("detailPanel")
+        self.nav.addItem("🎬  動画書き出し")
+        self.nav.addItem("🎞  mp4 有効化")
+        outer.addWidget(self.nav)
+
+        # 右: セクション本体
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._build_export_page())
+        self.stack.addWidget(self._build_mp4_page())
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(16, 14, 16, 14)
+        rv.setSpacing(12)
+        rv.addWidget(self.stack, 1)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        rv.addWidget(btns)
+        outer.addWidget(right, 1)
+
+        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.nav.setCurrentRow(0)
+
+    # ── 動画書き出しセクション ─────────────────────────
+    def _build_export_page(self):
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(12)
+
+        title = QLabel("◈  動画書き出し")
         title.setStyleSheet("font-size: 14px; color: #e8a838; letter-spacing: 1px;")
-        outer.addWidget(title)
+        v.addWidget(title)
 
         form = QFormLayout()
         form.setSpacing(10)
 
-        # 書き出し方式
         self.methodCombo = QComboBox()
         self.methodCombo.addItem("プレイブラスト（現在のビューを撮影）", "playblast")
         self.methodCombo.addItem("ハードウェア（別プロセスで裏で書き出し）", "hardware")
         idx = self.methodCombo.findData(get_export_method())
         if idx >= 0:
             self.methodCombo.setCurrentIndex(idx)
-        form.addRow("動画の書き出し方式:", self.methodCombo)
+        form.addRow("自動更新の書き出し方式:", self.methodCombo)
 
-        # 保存のたびに自動更新
         self.autoCheck = QCheckBox("シーンを保存するたびに動画を更新する")
         self.autoCheck.setChecked(get_auto_export_on_save())
         form.addRow("自動更新:", self.autoCheck)
 
-        # 最小間隔（分）
         self.intervalSpin = QSpinBox()
         self.intervalSpin.setRange(0, 600)
         self.intervalSpin.setSuffix(" 分")
@@ -2776,21 +2838,122 @@ class SettingsDialog(QDialog):
             "前回の動画更新からこの分数以上経過しているときだけ書き出します（0=毎回）。")
         form.addRow("最小間隔:", self.intervalSpin)
 
-        outer.addLayout(form)
+        v.addLayout(form)
 
         hint = QLabel("※ 自動更新は「保存のたび」に判定し、最後の更新から指定分数未満なら"
-                      "スキップします。")
+                      "スキップします。手動書き出しの方式はムービーバーのプルダウンで個別に選べます。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #4a5568; font-size: 10px;")
-        outer.addWidget(hint)
+        v.addWidget(hint)
+        v.addStretch(1)
+        return page
 
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        outer.addWidget(btns)
+    # ── mp4 有効化セクション ───────────────────────────
+    def _build_mp4_page(self):
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(10)
+
+        title = QLabel("◈  mp4 有効化（OpenCV / cv2）")
+        title.setStyleSheet("font-size: 14px; color: #e8a838; letter-spacing: 1px;")
+        v.addWidget(title)
+
+        self.cv2StatusLabel = QLabel()
+        self.cv2StatusLabel.setStyleSheet("font-size: 12px;")
+        v.addWidget(self.cv2StatusLabel)
+
+        desc = QLabel(
+            "mp4 等の埋め込み再生には OpenCV(cv2) が必要です。--user 領域に導入するため"
+            "共有 Maya 本体は変更しません。アンインストールは Maya 再起動後に反映されます。")
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #4a5568; font-size: 10px;")
+        v.addWidget(desc)
+
+        row = QHBoxLayout()
+        self.cv2InstallBtn = QPushButton("⭳  インストール")
+        self.cv2InstallBtn.setObjectName("refreshBtn")
+        self.cv2InstallBtn.clicked.connect(self._do_install_cv2)
+        self.cv2UninstallBtn = QPushButton("🗑  アンインストール")
+        self.cv2UninstallBtn.setObjectName("refreshBtn")
+        self.cv2UninstallBtn.clicked.connect(self._do_uninstall_cv2)
+        row.addWidget(self.cv2InstallBtn)
+        row.addWidget(self.cv2UninstallBtn)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        self.cv2Log = QPlainTextEdit()
+        self.cv2Log.setReadOnly(True)
+        self.cv2Log.setPlaceholderText("pip 実行ログがここに表示されます。")
+        self.cv2Log.setStyleSheet(
+            "background: #0a0d14; color: #9aa6c0; border: 1px solid #1e2435;"
+            " font-size: 10px;")
+        v.addWidget(self.cv2Log, 1)
+
+        self._refresh_cv2_status()
+        return page
+
+    def _refresh_cv2_status(self):
+        if _HAS_CV2:
+            self.cv2StatusLabel.setText("状態: ✅ 有効（mp4 を埋め込み再生できます）")
+            self.cv2InstallBtn.setText("⟳  再インストール")
+        else:
+            self.cv2StatusLabel.setText("状態: ⚠ 無効（mp4 は外部プレイヤー／連番のみ）")
+            self.cv2InstallBtn.setText("⭳  インストール")
+
+    def _do_install_cv2(self):
+        self.cv2Log.setPlainText("インストール中…（数分かかる場合があります）")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ok, log = install_opencv()
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.cv2Log.setPlainText(log or "")
+        self._refresh_cv2_status()
+        self._notify_parent_cv2()
+        if ok:
+            QMessageBox.information(self, "完了", "cv2 を導入しました。mp4 が埋め込み再生されます。")
+        else:
+            QMessageBox.warning(self, "インストール失敗",
+                                "cv2 を導入できませんでした。ログを確認してください。")
+
+    def _do_uninstall_cv2(self):
+        r = QMessageBox.question(
+            self, "アンインストール",
+            "OpenCV(cv2) をアンインストールしますか？\n"
+            "（現在のセッションでは引き続き使える場合があります。完全な無効化は Maya 再起動後）",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if r != QMessageBox.Yes:
+            return
+        self.cv2Log.setPlainText("アンインストール中…")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ok, log = uninstall_opencv()
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.cv2Log.setPlainText(log or "")
+        if ok:
+            QMessageBox.information(
+                self, "完了",
+                "アンインストールしました。完全に無効化するには Maya を再起動してください。")
+        else:
+            QMessageBox.warning(self, "アンインストール",
+                                "対象が見つからないか失敗しました。ログを確認してください。")
+
+    def _notify_parent_cv2(self):
+        """親ウィンドウの mp4 有効化ボタン表示とプレビューを更新する。"""
+        win = self.parent()
+        try:
+            if win is not None and hasattr(win, "enableMp4Btn"):
+                win.enableMp4Btn.setVisible(not _HAS_CV2)
+            if win is not None and hasattr(win, "detailPanel"):
+                win.detailPanel.reload_video()
+        except Exception:
+            pass
 
     def save(self):
-        """設定を永続化する。"""
+        """動画書き出しセクションの設定を永続化する。"""
         set_export_method(self.methodCombo.currentData() or "playblast")
         set_auto_export_on_save(self.autoCheck.isChecked())
         set_auto_export_interval_min(self.intervalSpin.value())
