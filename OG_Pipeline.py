@@ -346,8 +346,12 @@ def resolve_stage_dir(stage, shot_folder, stage_subpath=""):
     stage['folder'] 未設定なら base/<工程名> にフォールバックする。
     """
     folder = (stage.get("folder") or "").strip()
-    if folder and os.path.isabs(folder):
+    # 絶対パス判定はドライブ(N:)/UNC(\\server) のみ。先頭 / の単独は相対扱い（無視）。
+    drive, _ = os.path.splitdrive(folder)
+    is_unc = folder.startswith("\\\\") or folder.startswith("//")
+    if folder and (drive or is_unc):
         return os.path.normpath(folder)
+    folder = folder.lstrip("/\\")   # 先頭スラッシュは無視（付いていても相対として扱う）
 
     # 起点(base): サブパスがあれば <ショット>/<サブパス>、無ければショットフォルダ自身
     base = shot_folder or ""
