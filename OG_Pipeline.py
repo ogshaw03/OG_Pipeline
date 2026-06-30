@@ -3826,11 +3826,11 @@ class OGPipelineWindow(QWidget):
         # 隠さないようにする（伸びると不透明背景が下線を覆ってしまうため）。
         self.currentShotLabel = QLabel("")
         self.currentShotLabel.setStyleSheet(
-            "color: #0f1117; background: #4a9eff; border-radius: 3px;"
-            " padding: 2px 9px; font-size: 12px; font-weight: bold;")
+            "color: #4a9eff; font-size: 19px; font-weight: bold;"
+            " background: transparent; border: none;")
         self.currentShotLabel.setVisible(False)
         layout.addWidget(self.currentShotLabel, 0, Qt.AlignVCenter)
-        layout.addSpacing(10)   # ショットナンバーとシーン名の間に少し余白
+        layout.addSpacing(12)   # ショットナンバーとシーン名の間に少し余白
 
         self.currentSceneLabel = QLabel("🎬  (シーン未取得)")
         self.currentSceneLabel.setStyleSheet(
@@ -3860,7 +3860,7 @@ class OGPipelineWindow(QWidget):
         # プロジェクト名は単純なテキスト（黄色）で表示。選択はプロジェクト設定から。
         self.projectLabel = QLabel("（未選択）")
         self.projectLabel.setStyleSheet(
-            "color: #e8a838; font-size: 13px; font-weight: bold;"
+            "color: #e8a838; font-size: 19px; font-weight: bold;"
             " background: transparent; border: none;")
         layout.addWidget(self.projectLabel)
 
@@ -4161,8 +4161,8 @@ class OGPipelineWindow(QWidget):
         movie_bar = QWidget()
         movie_bar.setStyleSheet("background: #0a0d14; border-top: 1px solid #1e2435;")
         mb = QVBoxLayout(movie_bar)
-        mb.setContentsMargins(12, 8, 12, 10)
-        mb.setSpacing(6)
+        mb.setContentsMargins(12, 6, 12, 8)
+        mb.setSpacing(8)
 
         # プルダウン（折りたたみ）見出し。既定は閉じておき、誤操作を防ぐ。
         self.exportToggle = QToolButton()
@@ -4173,16 +4173,17 @@ class OGPipelineWindow(QWidget):
         self.exportToggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.exportToggle.setStyleSheet(
             "QToolButton { color: #9aa6c0; font-size: 11px; border: none;"
-            " padding: 2px; }"
+            " padding: 1px; }"
             "QToolButton:hover { color: #e8c87a; }")
         self.exportToggle.clicked.connect(self._toggle_export_panel)
         mb.addWidget(self.exportToggle)
 
-        # 折りたたみ対象（既定で非表示）
+        # 折りたたみ対象（既定で非表示）。グローバル QSS の min-height を上書きして
+        # ハイライト（ホバー枠）が大きくならない・重ならないよう小さくする。
         self.exportContent = QWidget()
         ec = QVBoxLayout(self.exportContent)
         ec.setContentsMargins(0, 0, 0, 0)
-        ec.setSpacing(6)
+        ec.setSpacing(8)
 
         # 保存時の自動書き出し ON/OFF（環境設定と同じ値。ここで素早く切替できる）
         self.autoExportCheck = QCheckBox("保存時に自動書き出し")
@@ -4202,7 +4203,9 @@ class OGPipelineWindow(QWidget):
         mlab.setStyleSheet("font-size: 10px;")
         mrow.addWidget(mlab)
         self.exportMethodCombo = QComboBox()
-        self.exportMethodCombo.setStyleSheet("font-size: 10px;")
+        self.exportMethodCombo.setFixedHeight(22)
+        self.exportMethodCombo.setStyleSheet(
+            "QComboBox { font-size: 10px; min-height: 0; padding: 1px 6px; }")
         self.exportMethodCombo.addItem("プレイブラスト", "playblast")
         self.exportMethodCombo.addItem("ハードウェア(裏)", "hardware")
         self.exportMethodCombo.setToolTip(
@@ -4220,7 +4223,8 @@ class OGPipelineWindow(QWidget):
         self.playblastBtn = QPushButton("🎬  書き出し実行")
         self.playblastBtn.setObjectName("refreshBtn")
         self.playblastBtn.setFixedHeight(24)
-        self.playblastBtn.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.playblastBtn.setStyleSheet(
+            "#refreshBtn { font-size: 11px; min-height: 0; padding: 2px 8px; }")
         self.playblastBtn.setToolTip("現在のシーンを Pipeline_Movie にシーン名と同名で書き出す（手動は間隔制限なし）")
         self.playblastBtn.clicked.connect(self._playblast_current)
         ec.addWidget(self.playblastBtn)
