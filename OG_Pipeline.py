@@ -543,10 +543,18 @@ def apply_stage_rename(stem, stage, all_stages=None):
     """
     new = stem
     target = (stage.get("rename_to") or stage.get("name") or "").strip()
+    rf = (stage.get("rename_from") or "").strip()
 
     replaced = False
-    if target and all_stages:
-        # 現シーン名に含まれる工程トークンの候補（自分以外）を長い順に試す
+    if rf:
+        # リネーム元が明示されている → これを唯一の基準にする（大文字小文字も厳密）。
+        # 見つからなければ置換しない（呼び出し側で中断・警告）。誤った自動置換で
+        # 取り違えたまま保存されるのを防ぐ。
+        if target and rf in new:
+            new = new.replace(rf, target)
+            replaced = True
+    elif target and all_stages:
+        # リネーム元 未設定のときだけ、他工程のトークンを自動検出して置換する。
         tokens = []
         for s in all_stages:
             for tok in (s.get("rename_to"), s.get("name")):
@@ -557,12 +565,6 @@ def apply_stage_rename(stem, stage, all_stages=None):
             new = new.replace(tok, target)
             replaced = True
             break
-
-    if not replaced:
-        rf = stage.get("rename_from", "")
-        if rf and target and rf in new:
-            new = new.replace(rf, target)
-            replaced = True
 
     # テイク/ローカルは「数字入りの値」が入っている工程のときだけ初期化する。
     if re.search(r"\d", stage.get("take") or ""):
@@ -1719,6 +1721,73 @@ class VideoPlayer(QWidget):
             self._timer.start(max(1, int(1000 / max(1, self._seq_fps))))
 
 
+class IdleReleaseMonitor(QtCore.QObject):
+    """一定時間ユーザー操作が無ければ on_idle() を、操作再開で on_active() を呼ぶ。
+
+    アプリ全体の入力イベント（クリック/キー/ホイール/マウス移動）を監視してタイマーを
+    リセットする。無操作が続くと on_idle（＝再生停止しファイルロック解放）を実行し、
+    その後の操作で on_active（＝再生再開）を実行する。
+    """
+    def __init__(self, on_idle, on_active, interval_ms=60000, parent=None):
+        super().__init__(parent)
+        self._on_idle = on_idle
+        self._on_active = on_active
+        self._idle = False
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(int(interval_ms))
+        self._timer.timeout.connect(self._fire)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+        self._timer.start()
+
+    _INPUT_TYPES = None
+
+    def _input_types(self):
+        if IdleReleaseMonitor._INPUT_TYPES is None:
+            E = QtCore.QEvent
+            IdleReleaseMonitor._INPUT_TYPES = {
+                E.MouseMove, E.MouseButtonPress, E.MouseButtonRelease,
+                E.MouseButtonDblClick, E.KeyPress, E.Wheel,
+            }
+        return IdleReleaseMonitor._INPUT_TYPES
+
+    def _fire(self):
+        if not self._idle:
+            self._idle = True
+            try:
+                self._on_idle()
+            except Exception:
+                pass
+
+    def eventFilter(self, obj, ev):
+        try:
+            if ev.type() in self._input_types():
+                self._timer.start()   # カウントダウンをリセット
+                if self._idle:
+                    self._idle = False
+                    try:
+                        self._on_active()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return False   # イベントは消費しない
+
+    def stop(self):
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.removeEventFilter(self)
+            except Exception:
+                pass
+
+
 # ─── 全ショット動画一覧（グリッド・自動再生） ───────────────────────────────────
 # 工程ごとの色。バッジ・サイドバーのラベルに使う（暗い文字が乗る前提の明るめの色）。
 _STAGE_COLOR_MAP = {
@@ -2331,6 +2400,21 @@ class AllShotsDialog(QDialog):
         self._sync_size_slider()
         self._rebuild()
 
+        # 無操作が一定時間続いたら自動で再生停止しロック解放（外部で削除/移動可能に）
+        self._idle_suspended = False
+        self._idle_mon = IdleReleaseMonitor(
+            self._on_idle_release, self._on_idle_active, 60000, self)
+
+    # ── 無操作タイムアウトで再生停止／操作再開で復帰 ─────────
+    def _on_idle_release(self):
+        self._idle_suspended = True
+        self.stop_all()
+
+    def _on_idle_active(self):
+        self._idle_suspended = False
+        if self.isActiveWindow() and not getattr(self, "_playback_suspended", False):
+            self._update_visible()
+
     # ── 工程の解決（工程設定があれば優先） ─────────────────
     def _stage_subpath_for(self, subpath):
         """工程解決に使うサブパス。サブパス指定時はタイルのフォルダが既に解決済み
@@ -2726,8 +2810,9 @@ class AllShotsDialog(QDialog):
     def _update_visible(self, *args):
         if not self.isVisible():
             return
-        if getattr(self, "_playback_suspended", False):
-            return   # 手動停止中（削除可モード）は再生しない
+        if getattr(self, "_playback_suspended", False) or \
+                getattr(self, "_idle_suspended", False):
+            return   # 手動停止中／無操作停止中（削除可）は再生しない
         for cell in self._all_cells():
             try:
                 visible = not cell.visibleRegion().isEmpty()
@@ -2754,8 +2839,12 @@ class AllShotsDialog(QDialog):
         self._resize_timer.start(200)
 
     def changeEvent(self, event):
+        # 非アクティブ（エクスプローラー等へ切替）/最小化になったら再生を止めて
+        # 動画ファイルの OS ロックを解放する → その隙に外部で削除/移動できる。
+        # アクティブ復帰で表示中タイルの再生を再開する（停止フラグは _update_visible で考慮）。
         try:
-            relevant = event.type() in (event.WindowStateChange, event.ActivationChange)
+            relevant = event.type() in (QtCore.QEvent.WindowStateChange,
+                                        QtCore.QEvent.ActivationChange)
         except Exception:
             relevant = False
         super().changeEvent(event)
@@ -2763,33 +2852,22 @@ class AllShotsDialog(QDialog):
             if self.isActiveWindow() and not self.isMinimized():
                 self._update_visible()
             else:
-                for cell in self._all_cells():
-                    cell.pause()
+                self.stop_all()
 
     def hideEvent(self, event):
-        for cell in self._all_cells():
-            cell.pause()
+        self.stop_all()
         super().hideEvent(event)
 
     def stop_all(self):
         for cell in self._all_cells():
             cell.stop()
 
-    def changeEvent(self, event):
-        # ウィンドウが非アクティブ（エクスプローラー等へ切替）になったら再生を停止し、
-        # 動画ファイルの OS ロックを解放する → その隙に外部で削除/移動できる。
-        # アクティブに戻ったら表示中タイルの再生を再開する。
+    def closeEvent(self, event):
         try:
-            if event.type() == QtCore.QEvent.ActivationChange:
-                if self.isActiveWindow():
-                    QTimer.singleShot(0, self._update_visible)
-                else:
-                    self.stop_all()
+            if getattr(self, "_idle_mon", None) is not None:
+                self._idle_mon.stop()
         except Exception:
             pass
-        super().changeEvent(event)
-
-    def closeEvent(self, event):
         self.stop_all()
         super().closeEvent(event)
 
@@ -4280,8 +4358,28 @@ class OGPipelineWindow(QWidget):
         # 保存時の自動書き出し（SceneSaved を監視。判定は実行時に設定を読む）
         self._register_save_job()
 
+        # 無操作が続いたら詳細パネルの再生を止めてファイルロックを解放
+        self._idle_suspended = False
+        self._idle_mon = IdleReleaseMonitor(
+            self._on_idle_release, self._on_idle_active, 60000, self)
+
         # 起動時フォーカスを検索欄ではなくブラウザに置く
         QTimer.singleShot(0, self._focus_browser)
+
+    def _on_idle_release(self):
+        self._idle_suspended = True
+        try:
+            self.detailPanel.video.suspend()
+        except Exception:
+            pass
+
+    def _on_idle_active(self):
+        self._idle_suspended = False
+        if self.isActiveWindow() and not getattr(self, "_playback_suspended", False):
+            try:
+                self.detailPanel.video.resume()
+            except Exception:
+                pass
 
     def _focus_browser(self):
         """ブラウザの先頭カラムにフォーカスを当てる（検索欄の自動フォーカス回避）。"""
@@ -4610,7 +4708,8 @@ class OGPipelineWindow(QWidget):
                 vp = getattr(getattr(self, "detailPanel", None), "video", None)
                 if vp is not None:
                     if self.isActiveWindow():
-                        if not getattr(self, "_playback_suspended", False):
+                        if not getattr(self, "_playback_suspended", False) \
+                                and not getattr(self, "_idle_suspended", False):
                             vp.resume()
                     else:
                         vp.suspend()
@@ -4626,6 +4725,11 @@ class OGPipelineWindow(QWidget):
         """
         try:
             self._sceneTimer.stop()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_idle_mon", None) is not None:
+                self._idle_mon.stop()
         except Exception:
             pass
         for t in getattr(self, "_hw_watchers", []):
