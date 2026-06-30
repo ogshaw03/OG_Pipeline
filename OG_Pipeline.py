@@ -2096,10 +2096,19 @@ class AllShotsDialog(QDialog):
         except Exception:
             names = []
         has_subpath = bool((self._stage_subpath or "").strip())
+        print("[OG_Pipeline] AllShots: shots_parent=", shots_parent,
+              "subpath=", repr(self._stage_subpath), "has_subpath=", has_subpath,
+              "stages_cfg=", bool(self._stages))
+        _dbg = 0
         for d in names:
             full = os.path.join(shots_parent, d)
             if not os.path.isdir(full):
                 continue
+            if has_subpath and _dbg < 3:
+                _dbg += 1
+                ex = expand_stage_bases(full, self._stage_subpath)
+                print("[OG_Pipeline]   shot=", d, "matched=",
+                      [os.path.relpath(x, full) for x in ex])
             if has_subpath:
                 # サブパス（ワイルドカード可）がマッチした各フォルダ＝1タイル＝最新動画。
                 # 例: shot/<キャラ>/<モーション> なら subpath="*/*" で各モーションがタイルに。
