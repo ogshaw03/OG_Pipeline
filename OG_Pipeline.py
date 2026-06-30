@@ -2733,6 +2733,20 @@ class AllShotsDialog(QDialog):
         for cell in self._all_cells():
             cell.stop()
 
+    def changeEvent(self, event):
+        # ウィンドウが非アクティブ（エクスプローラー等へ切替）になったら再生を停止し、
+        # 動画ファイルの OS ロックを解放する → その隙に外部で削除/移動できる。
+        # アクティブに戻ったら表示中タイルの再生を再開する。
+        try:
+            if event.type() == QtCore.QEvent.ActivationChange:
+                if self.isActiveWindow():
+                    QTimer.singleShot(0, self._update_visible)
+                else:
+                    self.stop_all()
+        except Exception:
+            pass
+        super().changeEvent(event)
+
     def closeEvent(self, event):
         self.stop_all()
         super().closeEvent(event)
