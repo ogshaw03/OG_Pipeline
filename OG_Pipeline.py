@@ -34,7 +34,8 @@ try:
         QSizePolicy, QToolButton, QStatusBar, QProgressBar, QFileDialog,
         QListWidget, QListWidgetItem, QInputDialog, QMenu,
         QDialog, QDialogButtonBox, QGridLayout, QCheckBox, QSpinBox, QFormLayout,
-        QStackedWidget, QPlainTextEdit, QTableWidget, QTableWidgetItem, QHeaderView
+        QStackedWidget, QPlainTextEdit, QTableWidget, QTableWidgetItem, QHeaderView,
+        QSlider
     )
 except ImportError:
     try:
@@ -1134,6 +1135,32 @@ def set_pending_cv2_uninstall(value):
     _write_config(cfg)
 
 
+def get_grid_cols():
+    try:
+        return min(7, max(5, int(_read_config().get("allshots_grid_cols", 5))))
+    except Exception:
+        return 5
+
+
+def set_grid_cols(n):
+    cfg = _read_config()
+    cfg["allshots_grid_cols"] = min(7, max(5, int(n)))
+    _write_config(cfg)
+
+
+def get_list_rows():
+    try:
+        return min(20, max(5, int(_read_config().get("allshots_list_rows", 8))))
+    except Exception:
+        return 8
+
+
+def set_list_rows(n):
+    cfg = _read_config()
+    cfg["allshots_list_rows"] = min(20, max(5, int(n)))
+    _write_config(cfg)
+
+
 def get_manual_export_method():
     """手動書き出しの方式（ムービーバーのプルダウン）。未設定なら自動更新の方式に従う。"""
     m = _read_config().get("manual_export_method")
@@ -1612,8 +1639,14 @@ class GridVideoCell(QWidget):
 
     def __init__(self, title, media, stage="", on_click=None, payload=None,
                  title_color=None, folder=None, on_drill=None,
-                 drill_label="⮞ リーブ", show_header=True, hover=True, parent=None):
+                 drill_label="⮞ リーブ", show_header=True, hover=True,
+                 cell_w=None, cell_h=None, parent=None):
         super().__init__(parent)
+        # タイルサイズはインスタンスごとに上書き可（スライダーで可変）
+        if cell_w:
+            self.CELL_W = int(cell_w)
+        if cell_h:
+            self.CELL_H = int(cell_h)
         self.setFixedWidth(self.CELL_W)
         self.setObjectName("gridCell")
         # QWidget サブクラスはこの属性が無いと QSS の背景/枠（:hover 含む）が描画されない
@@ -2005,6 +2038,8 @@ class AllShotsDialog(QDialog):
         self._shots_parent = shots_parent
         self._sort_mode = "shot"
         self._view_mode = "grid"   # "grid" / "list"
+        self._grid_cols = get_grid_cols()   # グリッド列数 5..7
+        self._list_rows = get_list_rows()   # リスト同時表示行数 5..20
         self._cells = []        # グリッド/リストのショットタイル
         self._side_cells = []   # サイドバー（工程）タイル
 
@@ -2046,6 +2081,17 @@ class AllShotsDialog(QDialog):
         hl.addWidget(self.gridBtn)
         hl.addWidget(self.listBtn)
         hl.addSpacing(12)
+
+        # 表示数スライダー（グリッド=列数5..7 / リスト=同時表示行数5..20）
+        self._sizeLabel = QLabel("")
+        self._sizeLabel.setStyleSheet("color: #6b7794; font-size: 11px;")
+        hl.addWidget(self._sizeLabel)
+        self._sizeSlider = QSlider(Qt.Horizontal)
+        self._sizeSlider.setFixedWidth(120)
+        self._sizeSlider.valueChanged.connect(self._on_size_slider)
+        hl.addWidget(self._sizeSlider)
+        hl.addSpacing(12)
+
         hl.addWidget(QLabel("並び替え:"))
         self._sortCombo = QComboBox()
         self._sortCombo.addItems(["ショット名", "工程"])
@@ -2136,6 +2182,7 @@ class AllShotsDialog(QDialog):
         nshots = len({s.get("shot") for s in self._shot_data})
         self._foot.setText(
             f"{len(self._shot_data)} 件 / {nshots}　（{note}／表示中のみ再生）")
+        self._sync_size_slider()
         self._rebuild()
 
     # ── 工程の解決（工程設定があれば優先） ─────────────────
@@ -2237,11 +2284,36 @@ class AllShotsDialog(QDialog):
             return "", media
         return "", None
 
-    # ── 表示モード・ソート ──────────────────────────────
+    # ── 表示モード・ソート・表示数スライダー ──────────────
     def _set_view_mode(self, mode):
         self._view_mode = mode
         self.gridBtn.setChecked(mode == "grid")
         self.listBtn.setChecked(mode == "list")
+        self._sync_size_slider()
+        self._rebuild()
+
+    def _sync_size_slider(self):
+        """現在の表示モードに合わせてスライダーの範囲・値・ラベルを設定する。"""
+        self._sizeSlider.blockSignals(True)
+        if self._view_mode == "list":
+            self._sizeSlider.setRange(5, 20)
+            self._sizeSlider.setValue(self._list_rows)
+            self._sizeLabel.setText("表示数 %d" % self._list_rows)
+        else:
+            self._sizeSlider.setRange(5, 7)
+            self._sizeSlider.setValue(self._grid_cols)
+            self._sizeLabel.setText("列数 %d" % self._grid_cols)
+        self._sizeSlider.blockSignals(False)
+
+    def _on_size_slider(self, v):
+        if self._view_mode == "list":
+            self._list_rows = v
+            set_list_rows(v)
+            self._sizeLabel.setText("表示数 %d" % v)
+        else:
+            self._grid_cols = v
+            set_grid_cols(v)
+            self._sizeLabel.setText("列数 %d" % v)
         self._rebuild()
 
     def _on_sort_changed(self, text):
@@ -2280,35 +2352,46 @@ class AllShotsDialog(QDialog):
         grid = QGridLayout(content)
         grid.setContentsMargins(10, 10, 10, 10)
         grid.setSpacing(10)
+        cols = max(1, int(self._grid_cols))
+        # 利用可能幅に cols 列が収まるようタイル幅を算出（高さは 90/208 比）
+        avail = self._scroll.viewport().width() or (self.width() - 360)
+        cw = max(120, int((avail - 20 - (cols + 1) * 10) / cols))
+        ch = max(60, int(cw * 90 / 208))
         r = c = 0
         for s in self._sorted_shot_data():
             # タイトル＝マッチしたフォルダ（例: モーション）名、バッジ＝親（例: キャラ）名
             cell = GridVideoCell(s.get("title", s["name"]), s["media"],
                                  stage=s.get("badge", ""),
                                  on_click=self._select_shot, payload=s["folder"],
-                                 folder=None, on_drill=None, parent=content)
+                                 folder=None, on_drill=None,
+                                 cell_w=cw, cell_h=ch, parent=content)
             grid.addWidget(cell, r, c, Qt.AlignLeft | Qt.AlignTop)
             self._cells.append(cell)
             c += 1
-            if c >= self.COLS:
+            if c >= cols:
                 c = 0
                 r += 1
-        grid.setColumnStretch(self.COLS, 1)   # 余白を右・下へ逃がし左上詰め
+        grid.setColumnStretch(cols, 1)   # 余白を右・下へ逃がし左上詰め
         grid.setRowStretch(r + 1, 1)
         self._scroll.setWidget(content)        # 旧コンテンツは破棄される
 
     def _rebuild_list(self):
         content = QWidget()
         v = QVBoxLayout(content)
-        v.setContentsMargins(10, 10, 10, 10)
-        v.setSpacing(6)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(5)
+
+        # 同時に rows 行が収まるようプレビュータイルの高さを算出
+        rows = max(1, int(self._list_rows))
+        avail_h = self._scroll.viewport().height() or (self.height() - 160)
+        th = max(40, int((avail_h - 24) / rows) - 11)   # 行間/余白ぶんを差し引く
+        tw = int(th * 208 / 90)
 
         # 列見出し
         header = QWidget()
         hh = QHBoxLayout(header)
         hh.setContentsMargins(6, 0, 6, 0)
-        for text, w in (("ショット名", 150), ("最新動画", GridVideoCell.CELL_W + 8),
-                        ("工程", 0)):
+        for text, w in (("ショット名", 150), ("最新動画", tw + 8), ("工程", 0)):
             lab = QLabel(text)
             lab.setStyleSheet("color: #6b7794; font-size: 11px; font-weight: bold;")
             if w:
@@ -2317,11 +2400,11 @@ class AllShotsDialog(QDialog):
         v.addWidget(header)
 
         for s in self._sorted_shot_data():
-            v.addWidget(self._build_list_row(s, content))
+            v.addWidget(self._build_list_row(s, content, tw, th))
         v.addStretch(1)
         self._scroll.setWidget(content)
 
-    def _build_list_row(self, s, parent):
+    def _build_list_row(self, s, parent, tw=None, th=None):
         # 行（ショット列）全体をクリックすると工程サイドバーを表示する
         row = ClickableRow(self._select_shot, s["folder"], parent)
         row.setObjectName("gridCell")
@@ -2344,7 +2427,8 @@ class AllShotsDialog(QDialog):
 
         # 最新動画（プレビュータイル。ヘッダー無し）
         # タイル自身は選択トリガにしない（クリックは行へ伝播して行選択になる）
-        cell = GridVideoCell(s["name"], s["media"], show_header=False, parent=row)
+        cell = GridVideoCell(s["name"], s["media"], show_header=False,
+                             cell_w=tw, cell_h=th, parent=row)
         h.addWidget(cell, 0, Qt.AlignVCenter)
         self._cells.append(cell)
 
