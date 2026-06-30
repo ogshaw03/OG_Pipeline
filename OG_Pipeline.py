@@ -295,7 +295,8 @@ def _try_import_cv2():
     return _HAS_CV2
 
 
-_try_import_cv2()
+# cv2 の import は、保留アンインストール処理を先に走らせるため、
+# 全関数定義の後（ファイル末尾の _cv2_startup()）で行う。
 
 
 def _find_mayapy():
@@ -496,7 +497,51 @@ def uninstall_opencv():
                 ok_any = True
         except Exception as e:
             logs.append("%s: %s" % (pkg, e))
+    cl = _cleanup_cv2_leftovers()
+    if cl:
+        logs.append("掃除: " + ", ".join(cl))
+        ok_any = True
     return ok_any, "\n".join(logs)
+
+
+def _cleanup_cv2_leftovers():
+    """中断した pip uninstall が残す壊れたフォルダ/配布情報を掃除する。
+
+    例: '~v2'（cv2.pyd の残骸）、先頭が '-' の不正 dist（'-pencv-python-headless'）。
+    ロード中の cv2.pyd は削除できないため、cv2 を import していない起動直後に有効。
+    戻り値: 削除できた項目名のリスト。
+    """
+    removed = []
+    try:
+        import site
+        dirs = []
+        if hasattr(site, "getusersitepackages"):
+            us = site.getusersitepackages()
+            if isinstance(us, str):
+                dirs.append(us)
+        for sp in dirs:
+            if not sp or not os.path.isdir(sp):
+                continue
+            for name in os.listdir(sp):
+                low = name.lower()
+                # pip が残す壊れた項目は先頭が '~' か '-'。cv2/opencv 関連だけ対象にする。
+                broken = name.startswith("~") or name.startswith("-")
+                related = ("cv2" in low or "v2" in low or "pencv" in low
+                           or "opencv" in low)
+                if broken and related:
+                    full = os.path.join(sp, name)
+                    try:
+                        if os.path.isdir(full):
+                            shutil.rmtree(full, ignore_errors=True)
+                        else:
+                            os.remove(full)
+                        if not os.path.exists(full):
+                            removed.append(name)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return removed
 
 
 class Cv2VideoThread(QThread):
@@ -816,6 +861,17 @@ def set_auto_export_interval_min(minutes):
         cfg["auto_export_interval_min"] = max(0, int(minutes))
     except Exception:
         cfg["auto_export_interval_min"] = 1
+    _write_config(cfg)
+
+
+def get_pending_cv2_uninstall():
+    """次回起動時に cv2 をアンインストールする予約があるか。"""
+    return bool(_read_config().get("pending_cv2_uninstall", False))
+
+
+def set_pending_cv2_uninstall(value):
+    cfg = _read_config()
+    cfg["pending_cv2_uninstall"] = bool(value)
     _write_config(cfg)
 
 
@@ -2894,14 +2950,16 @@ class SettingsDialog(QDialog):
         return page
 
     def _refresh_cv2_status(self):
-        if _HAS_CV2:
+        if get_pending_cv2_uninstall():
+            self.cv2StatusLabel.setText("状態: ⏳ 次回 Maya 起動時にアンインストール予約済み")
+        elif _HAS_CV2:
             self.cv2StatusLabel.setText("状態: ✅ 有効（mp4 を埋め込み再生できます）")
-            self.cv2InstallBtn.setText("⟳  再インストール")
         else:
             self.cv2StatusLabel.setText("状態: ⚠ 無効（mp4 は外部プレイヤー／連番のみ）")
-            self.cv2InstallBtn.setText("⭳  インストール")
+        self.cv2InstallBtn.setText("⟳  再インストール" if _HAS_CV2 else "⭳  インストール")
 
     def _do_install_cv2(self):
+        set_pending_cv2_uninstall(False)   # 予約があれば取り消す
         self.cv2Log.setPlainText("インストール中…（数分かかる場合があります）")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -2918,14 +2976,29 @@ class SettingsDialog(QDialog):
                                 "cv2 を導入できませんでした。ログを確認してください。")
 
     def _do_uninstall_cv2(self):
-        r = QMessageBox.question(
-            self, "アンインストール",
-            "OpenCV(cv2) をアンインストールしますか？\n"
-            "（現在のセッションでは引き続き使える場合があります。完全な無効化は Maya 再起動後）",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if r != QMessageBox.Yes:
+        # 現セッションで cv2 が読み込まれていると cv2.pyd が OS ロックされ、
+        # どのプロセスからも削除できない（WinError 5）。その場合は次回起動時に
+        # （cv2 を import する前に）アンインストールするよう予約する。
+        cv2_loaded = ("cv2" in sys.modules) or _HAS_CV2
+        if cv2_loaded:
+            r = QMessageBox.question(
+                self, "アンインストール（次回起動時）",
+                "現在 cv2 が使用中のため、今すぐは削除できません"
+                "（ファイルが OS にロックされています）。\n\n"
+                "次回 Maya 起動時に、cv2 を読み込む前に自動でアンインストールします。\n"
+                "予約しますか？",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if r != QMessageBox.Yes:
+                return
+            set_pending_cv2_uninstall(True)
+            self.cv2StatusLabel.setText("状態: ⏳ 次回 Maya 起動時にアンインストール予約済み")
+            self.cv2Log.setPlainText(
+                "次回 Maya 起動時に cv2 をアンインストールします。\n"
+                "（予約を取り消すには、もう一度この画面でインストールを実行してください）")
             return
+
+        # cv2 未ロード（再起動直後など）→ 即時アンインストール可能
         self.cv2Log.setPlainText("アンインストール中…")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -2933,10 +3006,9 @@ class SettingsDialog(QDialog):
         finally:
             QApplication.restoreOverrideCursor()
         self.cv2Log.setPlainText(log or "")
+        self._refresh_cv2_status()
         if ok:
-            QMessageBox.information(
-                self, "完了",
-                "アンインストールしました。完全に無効化するには Maya を再起動してください。")
+            QMessageBox.information(self, "完了", "アンインストールしました。")
         else:
             QMessageBox.warning(self, "アンインストール",
                                 "対象が見つからないか失敗しました。ログを確認してください。")
@@ -4468,6 +4540,29 @@ class OGPipelineWindow(QWidget):
             self.browser.reveal_path(save_path)
         except Exception:
             pass
+
+
+# ─── cv2 起動処理（import 前に保留アンインストールを実行） ──────────────────────
+def _cv2_startup():
+    """モジュール読み込み時の cv2 セットアップ。
+
+    保留中の cv2 アンインストール予約があれば、cv2 を import する前に
+    （＝ファイルがロックされていない状態で）実行して確定させる。
+    予約が無ければ通常どおり cv2 を import する。
+    """
+    try:
+        if get_pending_cv2_uninstall():
+            set_pending_cv2_uninstall(False)
+            ok, log = uninstall_opencv()
+            print("[OG_Pipeline] 予約された cv2 アンインストールを実行しました:\n"
+                  + (log or ""))
+            return   # cv2 は import しない（無効化を確定）
+    except Exception as e:
+        print("[OG_Pipeline] 保留アンインストール処理でエラー:", e)
+    _try_import_cv2()
+
+
+_cv2_startup()
 
 
 # ─── エントリーポイント ────────────────────────────────────────────────────────
