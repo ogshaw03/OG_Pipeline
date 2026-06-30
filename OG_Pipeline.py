@@ -3684,8 +3684,23 @@ class OGPipelineWindow(QWidget):
             self.statusLabel.setText("🎬 自動プレイブラスト中…")
             self._playblast(cur)
 
+    def _shot_number_of(self, scene_path):
+        """シーンのショットナンバーを返す。ショットフォルダ名→ファイル名の sh### の順で判定。"""
+        if not scene_path:
+            return ""
+        sp = getattr(self, "active_shots_parent", None)
+        if sp:
+            try:
+                sf = shot_folder_of(scene_path, sp)
+                if sf:
+                    return os.path.basename(sf)
+            except Exception:
+                pass
+        m = re.search(r"sh(?:fs)?\d+", os.path.basename(scene_path), re.I)
+        return m.group(0) if m else ""
+
     def _update_current_scene_label(self):
-        """ヘッダー中央に現在開いている Maya シーン名を表示する。"""
+        """ヘッダー中央に現在開いている Maya シーン名とショットナンバーを表示する。"""
         name = ""
         try:
             import maya.cmds as cmds
@@ -3695,9 +3710,14 @@ class OGPipelineWindow(QWidget):
         if name:
             self.currentSceneLabel.setText("🎬  " + os.path.basename(name))
             self.currentSceneLabel.setToolTip(name)
+            shot = self._shot_number_of(name)
+            self.currentShotLabel.setText(shot)
+            self.currentShotLabel.setVisible(bool(shot))
         else:
             self.currentSceneLabel.setText("🎬  (未保存のシーン)")
             self.currentSceneLabel.setToolTip("")
+            self.currentShotLabel.setText("")
+            self.currentShotLabel.setVisible(False)
 
     # ════════════════════════════════════════════════════════════════════
     #  UI 構築
@@ -3763,6 +3783,13 @@ class OGPipelineWindow(QWidget):
             " background: transparent; border: none;")
         self.currentSceneLabel.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.currentSceneLabel)
+        # シーン名の隣にショットナンバーをバッジ表示
+        self.currentShotLabel = QLabel("")
+        self.currentShotLabel.setStyleSheet(
+            "color: #0f1117; background: #4a9eff; border-radius: 3px;"
+            " padding: 2px 9px; font-size: 12px; font-weight: bold;")
+        self.currentShotLabel.setVisible(False)
+        layout.addWidget(self.currentShotLabel)
         layout.addStretch()
 
         self.rootPathLabel = QLabel("▸  ルート未選択")
@@ -4087,9 +4114,25 @@ class OGPipelineWindow(QWidget):
         mb.setContentsMargins(12, 8, 12, 10)
         mb.setSpacing(6)
 
-        title = QLabel("🎬  動画書き出し")
-        title.setStyleSheet("color: #6b7794; font-size: 11px; letter-spacing: 1px;")
-        mb.addWidget(title)
+        # プルダウン（折りたたみ）見出し。既定は閉じておき、誤操作を防ぐ。
+        self.exportToggle = QToolButton()
+        self.exportToggle.setText("🎬  動画書き出し")
+        self.exportToggle.setCheckable(True)
+        self.exportToggle.setChecked(False)
+        self.exportToggle.setArrowType(Qt.RightArrow)
+        self.exportToggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.exportToggle.setStyleSheet(
+            "QToolButton { color: #9aa6c0; font-size: 11px; border: none;"
+            " padding: 2px; }"
+            "QToolButton:hover { color: #e8c87a; }")
+        self.exportToggle.clicked.connect(self._toggle_export_panel)
+        mb.addWidget(self.exportToggle)
+
+        # 折りたたみ対象（既定で非表示）
+        self.exportContent = QWidget()
+        ec = QVBoxLayout(self.exportContent)
+        ec.setContentsMargins(0, 0, 0, 0)
+        ec.setSpacing(6)
 
         # 保存時の自動書き出し ON/OFF（環境設定と同じ値。ここで素早く切替できる）
         self.autoExportCheck = QCheckBox("保存時に自動書き出し")
@@ -4098,7 +4141,7 @@ class OGPipelineWindow(QWidget):
             "OFF（既定）なら保存しても書き出しは走りません。")
         self.autoExportCheck.setChecked(get_auto_export_on_save())
         self.autoExportCheck.toggled.connect(self._on_auto_export_toggled)
-        mb.addWidget(self.autoExportCheck)
+        ec.addWidget(self.autoExportCheck)
 
         # 方式プルダウン（手動書き出し用。環境設定とは独立。初期値は設定から）
         mrow = QHBoxLayout()
@@ -4117,15 +4160,23 @@ class OGPipelineWindow(QWidget):
             self.exportMethodCombo.setCurrentIndex(idx)
         self.exportMethodCombo.activated.connect(self._on_manual_method_changed)
         mrow.addWidget(self.exportMethodCombo, 1)
-        mb.addLayout(mrow)
+        ec.addLayout(mrow)
 
         # 現在シーンを Pipeline_Movie に書き出し（最小間隔は無視＝常に実行）
         self.playblastBtn = QPushButton("🎬  動画書き出し")
         self.playblastBtn.setObjectName("refreshBtn")
         self.playblastBtn.setToolTip("現在のシーンを Pipeline_Movie にシーン名と同名で書き出す（手動は間隔制限なし）")
         self.playblastBtn.clicked.connect(self._playblast_current)
-        mb.addWidget(self.playblastBtn)
+        ec.addWidget(self.playblastBtn)
+
+        self.exportContent.setVisible(False)   # 既定は閉じる
+        mb.addWidget(self.exportContent)
         return movie_bar
+
+    def _toggle_export_panel(self):
+        vis = self.exportToggle.isChecked()
+        self.exportContent.setVisible(vis)
+        self.exportToggle.setArrowType(Qt.DownArrow if vis else Qt.RightArrow)
 
     def _build_detail_panel(self) -> QWidget:
         self.detailPanel = DetailPanel()
