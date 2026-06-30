@@ -2096,9 +2096,13 @@ class AllShotsDialog(QDialog):
         #   "Boss_003" → base = ショット親/Boss_003 → そのキャラの各モーションがタイル
         #   "*"      → base = 各直下フォルダ → それぞれの子（全キャラのモーション等）がタイル
         self._shot_data = []
+        sp_norm = os.path.normcase(os.path.normpath(shots_parent))
         bases = expand_stage_bases(shots_parent, self._stage_subpath)
         for base in bases:
             parent_name = os.path.basename(base.rstrip("/\\"))
+            # ベースがショット親自身（＝サブパス未設定）のときは、バッジ（親名）を出さない。
+            # 出すとショット親フォルダ名が全タイルに付いて「サブパス設定時の状態」に見えるため。
+            is_top = os.path.normcase(os.path.normpath(base)) == sp_norm
             try:
                 children = sorted(os.listdir(base))
             except Exception:
@@ -2109,10 +2113,11 @@ class AllShotsDialog(QDialog):
                     continue
                 media = pick_folder_media(cdir)
                 if media:
+                    name = child if is_top else "%s / %s" % (parent_name, child)
                     self._shot_data.append(
-                        {"name": "%s / %s" % (parent_name, child), "folder": cdir,
-                         "media": media, "title": child, "badge": parent_name,
-                         "stage": child, "shot": parent_name})
+                        {"name": name, "folder": cdir, "media": media,
+                         "title": child, "badge": ("" if is_top else parent_name),
+                         "stage": child, "shot": (parent_name if not is_top else child)})
 
         nbase = len(bases)
         self._foot.setText(
