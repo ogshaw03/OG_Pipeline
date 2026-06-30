@@ -936,6 +936,8 @@ def _normalize_entries(data):
             # 各ショット内で工程フォルダが入っているサブパス（相対）。
             # 例: "ma" → <ショット>/ma/<工程>/ 。空＝ショット直下に工程フォルダ。
             "stage_subpath": str(e.get("stage_subpath", "")).strip().strip("/\\"),
+            # サブパスが表す対象の呼称（UI 表示用。例: "キャラ"）。空なら既定表示。
+            "subpath_label": str(e.get("subpath_label", "")).strip(),
             # 工程リスト（任意）。設定があれば工程ベースの保存に使う。
             "stages": _normalize_stages(e.get("stages")),
         })
@@ -990,12 +992,14 @@ def save_roots(roots):
         print("[OG_Pipeline] ルート保存エラー:", e)
 
 
-def add_root(name, path, shots_parent="", stage_subpath="", stages=None):
+def add_root(name, path, shots_parent="", stage_subpath="", stages=None,
+             subpath_label=""):
     """ルートを追加（同名は上書き）し、名前順で保存する。"""
     roots = [r for r in load_roots() if r["name"] != name]
     roots.append({"name": name, "path": path,
                   "shots_parent": (shots_parent or path),
                   "stage_subpath": (stage_subpath or "").strip().strip("/\\"),
+                  "subpath_label": (subpath_label or "").strip(),
                   "stages": _normalize_stages(stages or [])})
     roots.sort(key=lambda r: r["name"].lower())
     save_roots(roots)
@@ -2025,10 +2029,12 @@ class AllShotsDialog(QDialog):
     """
     COLS = 5
 
-    def __init__(self, shots_parent, parent=None, stage_subpath="", stages=None):
+    def __init__(self, shots_parent, parent=None, stage_subpath="", stages=None,
+                 subpath_label=""):
         super().__init__(parent)
         self._stage_subpath = stage_subpath or ""
         self._stages = stages or []   # 工程設定（あれば優先して使う）
+        self._subpath_label = subpath_label or ""   # サブパスの呼称（例: キャラ）
         self.setWindowFlags(Qt.Window)
         self.setWindowTitle("All Shots — 最新動画一覧")
         self.setMinimumSize(1200, 640)
@@ -2387,11 +2393,14 @@ class AllShotsDialog(QDialog):
         th = max(40, int((avail_h - 24) / rows) - 11)   # 行間/余白ぶんを差し引く
         tw = int(th * 208 / 90)
 
-        # 列見出し
+        # 列見出し。サブパス指定時はバッジ列の見出しを呼称（例: キャラ）にする。
+        has_sub = bool((self._stage_subpath or "").strip())
+        name_head = "名前" if has_sub else "ショット名"
+        badge_head = (self._subpath_label or "分類") if has_sub else "工程"
         header = QWidget()
         hh = QHBoxLayout(header)
         hh.setContentsMargins(6, 0, 6, 0)
-        for text, w in (("ショット名", 150), ("最新動画", tw + 8), ("工程", 0)):
+        for text, w in ((name_head, 150), ("最新動画", tw + 8), (badge_head, 0)):
             lab = QLabel(text)
             lab.setStyleSheet("color: #6b7794; font-size: 11px; font-weight: bold;")
             if w:
@@ -3482,6 +3491,11 @@ class ProjectSettingsDialog(QDialog):
         form.addRow("サブパス（この直下がタイル）:",
                     self._with_browse(self.stageEdit, self._browse_stage, "例から取得…"))
 
+        # サブパスが表す対象の呼称（UI のバッジ列見出しなどに使用。例: キャラ）
+        self.labelEdit = QLineEdit(entry.get("subpath_label", ""))
+        self.labelEdit.setPlaceholderText("サブパスの呼称（例: キャラ）。空なら『工程』")
+        form.addRow("サブパスの呼称:", self.labelEdit)
+
         # 次回も使用（起動時にこのプロジェクトを自動選択）。既定 ON。
         # 既に別プロジェクトが起動時設定なら OFF、未設定/自分なら ON。
         nm = entry.get("name", "")
@@ -3674,6 +3688,7 @@ class ProjectSettingsDialog(QDialog):
         self.rootEdit.setText(entry.get("path", ""))
         self.shotsEdit.setText(entry.get("shots_parent", ""))
         self.stageEdit.setPlainText(entry.get("stage_subpath", ""))
+        self.labelEdit.setText(entry.get("subpath_label", ""))
         self.stageTable.setRowCount(0)
         for st in entry.get("stages", []) or []:
             self._add_stage_row(st)
@@ -3724,6 +3739,7 @@ class ProjectSettingsDialog(QDialog):
             "shots_parent": self.shotsEdit.text().strip() or self.rootEdit.text().strip(),
             # 複数行＝複数サブパス。全体の前後空白だけ除去（各行は展開側で処理）。
             "stage_subpath": self.stageEdit.toPlainText().strip(),
+            "subpath_label": self.labelEdit.text().strip(),
             "stages": self._stages_from_table(),
         }
 
@@ -3968,6 +3984,7 @@ class OGPipelineWindow(QWidget):
         self.active_root = None
         self.active_shots_parent = None
         self.active_stage_subpath = ""   # 各ショット内の工程フォルダ相対サブパス
+        self.active_subpath_label = ""   # サブパスの呼称（例: キャラ）
         self.active_stages = []          # 工程リスト（プロジェクト設定）
         self._last_export_at = {}    # {正規化シーンパス: 最終書き出し time.time()}
         self._save_job = None        # SceneSaved scriptJob の ID
@@ -4285,7 +4302,8 @@ class OGPipelineWindow(QWidget):
         self._all_shots_dlg = AllShotsDialog(
             self.active_shots_parent, self,
             stage_subpath=getattr(self, "active_stage_subpath", ""),
-            stages=getattr(self, "active_stages", []))
+            stages=getattr(self, "active_stages", []),
+            subpath_label=getattr(self, "active_subpath_label", ""))
         self._all_shots_dlg.show()
         self._all_shots_dlg.raise_()
 
@@ -4618,6 +4636,7 @@ class OGPipelineWindow(QWidget):
         if not name:
             self.active_root = None
             self.active_shots_parent = None
+            self.active_subpath_label = ""
             self.active_stage_subpath = ""
             self.active_stages = []
             self.rootPathLabel.setText("▸  ルート未登録")
@@ -4630,6 +4649,7 @@ class OGPipelineWindow(QWidget):
         self.active_root = entry.get("path") or find_root_path(name)
         self.active_shots_parent = entry.get("shots_parent") or self.active_root
         self.active_stage_subpath = entry.get("stage_subpath", "") or ""
+        self.active_subpath_label = entry.get("subpath_label", "") or ""
         self.active_stages = entry.get("stages", []) or []
         self.rootPathLabel.setText(f"▸  {self.active_root}")
         self._apply_view()
@@ -4644,7 +4664,7 @@ class OGPipelineWindow(QWidget):
         if accepted:
             v = dlg.values()
             add_root(v["name"], v["path"], v["shots_parent"], v["stage_subpath"],
-                     v.get("stages"))
+                     v.get("stages"), subpath_label=v.get("subpath_label", ""))
             # 「次回も使用」チェックを起動時設定に反映
             if dlg.use_startup():
                 set_startup_root(v["name"])
