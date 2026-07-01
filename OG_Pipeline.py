@@ -2202,7 +2202,12 @@ class GridVideoCell(QWidget):
         if kind == "video":
             # 一度だけデコード→RAMからループ（多数同時でも軽い・デコードは共有）
             self._playing = True
-            self._start_mem_video(self._media[1])
+            if self._mem_frames and self._video_path == self._media[1]:
+                # 既に RAM 上にフレームがある → 再デコードせず今の位置から再開
+                # （スクロールで再表示するたびに先頭へ戻る＝カクつきを防ぐ）
+                self._resume_mem()
+            else:
+                self._start_mem_video(self._media[1])
         elif kind == "seq" and len(self._frames) > 1:
             if self._seq_timer is None:
                 self._seq_timer = QTimer(self)
@@ -2249,6 +2254,18 @@ class GridVideoCell(QWidget):
                 pass   # セルが破棄済み
 
         request_video_frames(path, self._decode_max_w(), on_ready)
+
+    def _resume_mem(self):
+        """既に保持しているフレームで、現在位置から再生を再開する（先頭に戻さない）。"""
+        if not self._mem_frames:
+            return
+        if self._mem_timer is None:
+            self._mem_timer = QTimer(self)
+            self._mem_timer.timeout.connect(self._next_mem)
+        self._mem_timer.start(max(8, int(1000.0 / max(1.0, maya_scene_fps()))))
+        if self._idx >= len(self._mem_frames):
+            self._idx = 0
+        self._show_mem(self._idx)
 
     def _next_mem(self):
         if not self._mem_frames:
@@ -2614,7 +2631,7 @@ class AllShotsDialog(QDialog):
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
-        self._scroll.verticalScrollBar().valueChanged.connect(self._update_visible)
+        self._scroll.verticalScrollBar().valueChanged.connect(self._schedule_update_visible)
         splitter.addWidget(self._scroll)
 
         side = QWidget()
@@ -2648,7 +2665,7 @@ class AllShotsDialog(QDialog):
         side_scroll = QScrollArea()
         side_scroll.setWidgetResizable(True)
         side_scroll.setWidget(self._side_content)
-        side_scroll.verticalScrollBar().valueChanged.connect(self._update_visible)
+        side_scroll.verticalScrollBar().valueChanged.connect(self._schedule_update_visible)
         self._side_scroll = side_scroll
         sv.addWidget(side_scroll, 1)
         splitter.addWidget(side)
@@ -3212,6 +3229,15 @@ class AllShotsDialog(QDialog):
             self.stop_all()
         else:
             self._update_visible()
+
+    def _schedule_update_visible(self, *args):
+        """スクロール中は連続発火するため、少し落ち着いてから可視判定する（再生の
+        ちらつき／先頭戻りを防ぐデバウンス）。"""
+        if not hasattr(self, "_visible_timer"):
+            self._visible_timer = QTimer(self)
+            self._visible_timer.setSingleShot(True)
+            self._visible_timer.timeout.connect(self._update_visible)
+        self._visible_timer.start(90)
 
     def _update_visible(self, *args):
         if not self.isVisible():
