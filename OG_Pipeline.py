@@ -2250,6 +2250,36 @@ class ClickableRow(QWidget):
         super().mousePressEvent(event)
 
 
+class SafeComboBox(QComboBox):
+    """マルチモニターでドロップダウンが別モニターに出る Qt の不具合対策。
+
+    showPopup 後にポップアップをコンボ直下（同一スクリーン内）へ移動する。
+    """
+    def showPopup(self):
+        super().showPopup()
+        try:
+            popup = self.view().window()
+            below = self.mapToGlobal(self.rect().bottomLeft())
+            x, y = below.x(), below.y()
+            ph = popup.height()
+            pw = popup.width()
+            scr = None
+            app = QApplication.instance()
+            screen_at = getattr(app, "screenAt", None) if app else None
+            if screen_at is not None:
+                s = screen_at(self.mapToGlobal(self.rect().center()))
+                if s is not None:
+                    scr = s.availableGeometry()
+            if scr is not None:
+                if y + ph > scr.bottom():   # 下に入らなければコンボ上へ
+                    y = self.mapToGlobal(self.rect().topLeft()).y() - ph
+                x = max(scr.left(), min(x, scr.right() - pw + 1))
+                y = max(scr.top(), min(y, scr.bottom() - ph + 1))
+            popup.move(x, y)
+        except Exception:
+            pass
+
+
 class AllShotsDialog(QDialog):
     """全ショットの最新動画をグリッドで一覧（工程バッジ・工程ソート）。
 
@@ -2341,7 +2371,7 @@ class AllShotsDialog(QDialog):
         hl.addSpacing(12)
 
         hl.addWidget(QLabel("工程で絞り込み:"))
-        self._filterCombo = QComboBox()
+        self._filterCombo = SafeComboBox()
         self._filterCombo.addItem("すべて", None)
         self._filterCombo.setToolTip("選んだ工程の動画だけを表示します")
         self._filterCombo.currentIndexChanged.connect(self._on_filter_changed)
@@ -2349,7 +2379,7 @@ class AllShotsDialog(QDialog):
         hl.addSpacing(12)
 
         hl.addWidget(QLabel("並び替え:"))
-        self._sortCombo = QComboBox()
+        self._sortCombo = SafeComboBox()
         self._sortCombo.addItems(["ショット名", "工程"])
         self._sortCombo.currentTextChanged.connect(self._on_sort_changed)
         hl.addWidget(self._sortCombo)
@@ -3868,7 +3898,7 @@ class ProjectSettingsDialog(QDialog):
         # プロジェクト選択プルダウン（既存を切替 or 新規）
         psel = QHBoxLayout()
         psel.addWidget(QLabel("プロジェクト:"))
-        self.projectCombo = QComboBox()
+        self.projectCombo = SafeComboBox()
         self._all_roots = load_roots()
         for r in self._all_roots:
             self.projectCombo.addItem(r["name"], r["name"])
@@ -4336,7 +4366,7 @@ class SettingsDialog(QDialog):
         form = QFormLayout()
         form.setSpacing(10)
 
-        self.methodCombo = QComboBox()
+        self.methodCombo = SafeComboBox()
         self.methodCombo.addItem("プレイブラスト（現在のビューを撮影）", "playblast")
         self.methodCombo.addItem("ハードウェア（別プロセスで裏で書き出し）", "hardware")
         idx = self.methodCombo.findData(get_export_method())
@@ -4998,7 +5028,7 @@ class OGPipelineWindow(QWidget):
         filter_label.setStyleSheet("color: #3a4055; font-size: 11px; letter-spacing: 1px;")
         layout.addWidget(filter_label)
 
-        self.typeFilter = QComboBox()
+        self.typeFilter = SafeComboBox()
         self.typeFilter.addItems(["ALL", ".ma", ".mb"])
         self.typeFilter.setFixedWidth(80)
         self.typeFilter.currentTextChanged.connect(self._apply_view)
@@ -5165,7 +5195,7 @@ class OGPipelineWindow(QWidget):
         mlab = QLabel("方式:")
         mlab.setStyleSheet("font-size: 11px;")
         mrow.addWidget(mlab)
-        self.exportMethodCombo = QComboBox()
+        self.exportMethodCombo = SafeComboBox()
         self.exportMethodCombo.setMinimumWidth(180)
         # 枠（通常/ホバー/フォーカス）を全辺明示して、ハイライトが欠けないようにする。
         self.exportMethodCombo.setStyleSheet(
