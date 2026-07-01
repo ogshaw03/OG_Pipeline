@@ -2581,8 +2581,6 @@ class VideoViewerDialog(QDialog):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._advance)
         self._bookmarks = set()   # ブックマークしたフレーム番号
-        self._f_held = False      # f キー押下中か（f+矢印でブックマーク送り）
-        self._f_used = False      # f 押下中に矢印が使われたか（単押しはトグル）
         # キーボード操作のためダイアログにフォーカスを保持（子は矢印/Space を奪わない）
         self.setFocusPolicy(Qt.StrongFocus)
 
@@ -2617,9 +2615,9 @@ class VideoViewerDialog(QDialog):
         self._playBtn = _mk("▶", "再生 / 停止（Space）", self._toggle)
         _mk("◀|", "前のフレーム（←）", lambda: self._step(-1))
         _mk("|▶", "次のフレーム（→）", lambda: self._step(1))
-        _mk("|◀★", "前のブックマーク（F+←）", lambda: self._goto_bookmark(-1))
+        _mk("|◀★", "前のブックマーク（↑）", lambda: self._goto_bookmark(-1))
         self._bmBtn = _mk("★", "現在フレームをブックマーク（F）", self._toggle_bookmark)
-        _mk("★▶|", "次のブックマーク（F+→）", lambda: self._goto_bookmark(1))
+        _mk("★▶|", "次のブックマーク（↓）", lambda: self._goto_bookmark(1))
         self._slider = BookmarkSlider(Qt.Horizontal)
         self._slider.setSingleStep(1)
         self._slider.setPageStep(1)
@@ -2789,38 +2787,21 @@ class VideoViewerDialog(QDialog):
 
     def keyPressEvent(self, event):
         k = event.key()
+        if k == Qt.Key_Left:
+            self._step(-1); return             # ← 前のフレーム
+        if k == Qt.Key_Right:
+            self._step(1); return              # → 次のフレーム
+        if k == Qt.Key_Up:
+            self._goto_bookmark(-1); return    # ↑ 前のブックマーク
+        if k == Qt.Key_Down:
+            self._goto_bookmark(1); return     # ↓ 次のブックマーク
         if k == Qt.Key_F:
             if not event.isAutoRepeat():
-                self._f_held = True
-                self._f_used = False
-            return
-        if k == Qt.Key_Left:
-            if self._f_held:
-                self._f_used = True
-                self._goto_bookmark(-1)   # F+← 前のブックマーク
-            else:
-                self._step(-1)            # ← 前のフレーム
-            return
-        if k == Qt.Key_Right:
-            if self._f_held:
-                self._f_used = True
-                self._goto_bookmark(1)    # F+→ 次のブックマーク
-            else:
-                self._step(1)             # → 次のフレーム
+                self._toggle_bookmark()        # F 現在フレームをブックマーク
             return
         if k == Qt.Key_Space:
             self._toggle(); return
         super().keyPressEvent(event)
-
-    def keyReleaseEvent(self, event):
-        if event.key() == Qt.Key_F and not event.isAutoRepeat():
-            # f 単押し（矢印と併用していない）＝現在フレームをブックマークのトグル
-            if self._f_held and not self._f_used:
-                self._toggle_bookmark()
-            self._f_held = False
-            self._f_used = False
-            return
-        super().keyReleaseEvent(event)
 
     def showEvent(self, event):
         super().showEvent(event)
