@@ -3527,10 +3527,13 @@ class AllShotsDialog(QDialog):
         self._update_visible()
 
     def _drill_to(self, folder):
-        """親（メインウィンドウ）のブラウザでこの工程フォルダを開く。"""
+        """親（メインウィンドウ）のブラウザでこの工程フォルダを開く。
+        スタンドアロン（Maya 非依存）ではブラウザが無いのでエクスプローラーで開く。"""
         win = self.parent()
         if win is not None and hasattr(win, "reveal_in_browser"):
             win.reveal_in_browser(folder)
+        elif folder:
+            open_file_external(folder)
 
     # ── 表示中のみ再生 ─────────────────────────────────
     def _all_cells(self):
