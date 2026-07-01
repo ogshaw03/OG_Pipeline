@@ -2340,6 +2340,14 @@ class AllShotsDialog(QDialog):
         hl.addWidget(self.pauseAllBtn)
         hl.addSpacing(12)
 
+        hl.addWidget(QLabel("工程で絞り込み:"))
+        self._filterCombo = QComboBox()
+        self._filterCombo.addItem("すべて", None)
+        self._filterCombo.setToolTip("選んだ工程の動画だけを表示します")
+        self._filterCombo.currentIndexChanged.connect(self._on_filter_changed)
+        hl.addWidget(self._filterCombo)
+        hl.addSpacing(12)
+
         hl.addWidget(QLabel("並び替え:"))
         self._sortCombo = QComboBox()
         self._sortCombo.addItems(["ショット名", "工程"])
@@ -2384,14 +2392,25 @@ class AllShotsDialog(QDialog):
         outer.addWidget(self._foot)
 
         # ── ショットデータ収集 ──
+        self._stage_filter = None   # None=すべて（最新工程）／工程名＝その工程で絞り込み
+        self._all_stage_names = []  # 絞り込みプルダウンの工程一覧
+        self._collect_data()
+        self._refresh_filter_combo()
+
+        # 無操作が一定時間続いたら自動で再生停止しロック解放（外部で削除/移動可能に）
+        self._idle_suspended = False
+        self._idle_mon = IdleReleaseMonitor(
+            self._on_idle_release, self._on_idle_active, 60000, self)
+
+    def _collect_data(self):
+        """タイルデータを収集する。self._stage_filter が工程名なら、その工程の動画で
+        絞り込む（各ショット/モーションのその工程フォルダの最新メディア）。None なら
+        従来どおり最新工程の動画を出す。"""
         self._shot_data = []
+        shots_parent = self._shots_parent
+        flt = getattr(self, "_stage_filter", None)
         has_subpath = bool((self._stage_subpath or "").strip())
         if has_subpath:
-            # サブパス設定あり: 辿ったフォルダ群（base, 表示名 label）の『子フォルダ』が
-            # 各タイル＝最新動画。バッジは [工程(設定時のみ), サブパス名]。
-            #   "Boss_003"      → そのキャラの各モーション（サブパス badge=Boss_003）
-            #   "Boss_003=ボス" → サブパス badge を『ボス』に
-            #   "*"             → 各キャラの各モーション（badge=各キャラ名）
             for base, label in expand_stage_bases_named(shots_parent, self._stage_subpath):
                 try:
                     children = sorted(os.listdir(base))
@@ -2401,10 +2420,15 @@ class AllShotsDialog(QDialog):
                     cdir = os.path.join(base, child)
                     if not os.path.isdir(cdir) or child == VIDEO_SUBDIR:
                         continue
-                    media = pick_folder_media(cdir)
-                    if not media:
-                        continue
-                    stg = self._stage_badge_for(cdir)   # 工程設定があれば工程名、無ければ ""
+                    if flt:
+                        media, stg = self._stage_media_for(cdir, flt)
+                        if not media:
+                            continue
+                    else:
+                        media = pick_folder_media(cdir)
+                        if not media:
+                            continue
+                        stg = self._stage_badge_for(cdir)
                     badges = []
                     if stg:
                         badges.append((stg, stage_color(stg)))
@@ -2413,10 +2437,8 @@ class AllShotsDialog(QDialog):
                         {"name": "%s / %s" % (label, child), "folder": cdir,
                          "media": media, "title": child, "badge": label,
                          "badges": badges, "stage": stg or child, "shot": label})
-            note = "サブパス配下のフォルダ単位の最新動画"
+            note = ("工程「%s」の動画" % flt) if flt else "サブパス配下のフォルダ単位の最新動画"
         else:
-            # サブパス未設定: 従来どおりショットごとに最新工程
-            # （工程設定があればそれ、無ければ工程フォルダ検出）の動画。バッジ＝工程名。
             try:
                 names = sorted(os.listdir(shots_parent))
             except Exception:
@@ -2425,13 +2447,19 @@ class AllShotsDialog(QDialog):
                 full = os.path.join(shots_parent, d)
                 if not os.path.isdir(full):
                     continue
-                stage_name, media = self._shot_latest(full)
-                if media or stage_name:
-                    self._shot_data.append(
-                        {"name": d, "folder": full, "media": media,
-                         "title": d, "badge": stage_name,
-                         "stage": stage_name, "shot": d})
-            note = "ショットごとの最新工程の動画"
+                if flt:
+                    media, stage_name = self._stage_media_for(full, flt)
+                    if not media:
+                        continue
+                else:
+                    stage_name, media = self._shot_latest(full)
+                    if not (media or stage_name):
+                        continue
+                self._shot_data.append(
+                    {"name": d, "folder": full, "media": media,
+                     "title": d, "badge": stage_name,
+                     "stage": stage_name, "shot": d})
+            note = ("工程「%s」の動画" % flt) if flt else "ショットごとの最新工程の動画"
 
         nshots = len({s.get("shot") for s in self._shot_data})
         self._foot.setText(
@@ -2439,10 +2467,46 @@ class AllShotsDialog(QDialog):
         self._sync_size_slider()
         self._rebuild()
 
-        # 無操作が一定時間続いたら自動で再生停止しロック解放（外部で削除/移動可能に）
-        self._idle_suspended = False
-        self._idle_mon = IdleReleaseMonitor(
-            self._on_idle_release, self._on_idle_active, 60000, self)
+    def _stage_media_for(self, folder, stage_name):
+        """指定した工程フォルダの最新メディアを返す。(media, 実工程名) / (None, stage_name)。"""
+        for name, media, _mt in self._stage_media_list(folder):
+            if name == stage_name or name.split("/")[-1] == stage_name:
+                return media, name
+        return None, stage_name
+
+    def _available_stage_names(self):
+        """絞り込みに使える工程名。工程設定があればその順、無ければ検出順。"""
+        if self._stages:
+            out = []
+            for st in self._stages:
+                nm = (st.get("name") or "").strip()
+                if nm and nm not in out:
+                    out.append(nm)
+            return out
+        seen = []
+        for s in self._shot_data:
+            stg = (s.get("stage") or "").split("/")[-1]
+            if stg and stg not in seen:
+                seen.append(stg)
+        return sorted(seen, key=lambda n: (_stage_rank(n)[0], n.lower()))
+
+    def _refresh_filter_combo(self):
+        if not hasattr(self, "_filterCombo"):
+            return
+        self._all_stage_names = self._available_stage_names()
+        self._filterCombo.blockSignals(True)
+        self._filterCombo.clear()
+        self._filterCombo.addItem("すべて", None)
+        for nm in self._all_stage_names:
+            self._filterCombo.addItem(nm, nm)
+        # 現在の絞り込みを選択状態に復元
+        idx = self._filterCombo.findData(self._stage_filter)
+        self._filterCombo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._filterCombo.blockSignals(False)
+
+    def _on_filter_changed(self, *args):
+        self._stage_filter = self._filterCombo.currentData()
+        self._collect_data()
 
     # ── 無操作タイムアウトで再生停止／操作再開で復帰 ─────────
     def _on_idle_release(self):
@@ -2652,11 +2716,19 @@ class AllShotsDialog(QDialog):
     def _sorted_shot_data(self):
         data = list(self._shot_data)
         if self._sort_mode == "stage":
-            # 工程順（lay→anm→その他）でグループ化し、同工程内はショット名順。
+            # 工程順でグループ化し、同工程内はショット名順。
+            # 工程設定があればその並び順（上→下）、無ければ既定順(lay→anm→他)。
             # 「<キャラ>/<工程>」形式は末尾（工程）で判定する。
+            order = {}
+            for i, st in enumerate(self._stages or []):
+                nm = (st.get("name") or "").strip().lower()
+                if nm and nm not in order:
+                    order[nm] = i
             def key(s):
                 stg = (s.get("stage") or "").split("/")[-1]
-                return (_stage_rank(stg), stg.lower(), s["name"].lower())
+                low = stg.lower()
+                rank = order[low] if low in order else (1000 + _stage_rank(stg)[0])
+                return (rank, low, s["name"].lower())
             data.sort(key=key)
         else:
             data.sort(key=lambda s: s["name"].lower())
@@ -3899,10 +3971,21 @@ class ProjectSettingsDialog(QDialog):
         delStageBtn = QPushButton("－ 選択行を削除")
         delStageBtn.setObjectName("refreshBtn")
         delStageBtn.clicked.connect(self._del_stage_row)
+        upStageBtn = QPushButton("↑ 上へ")
+        upStageBtn.setObjectName("refreshBtn")
+        upStageBtn.setToolTip("選択した工程を上へ（この並び順がショットリストの工程順になります）")
+        upStageBtn.clicked.connect(lambda: self._move_stage_row(-1))
+        downStageBtn = QPushButton("↓ 下へ")
+        downStageBtn.setObjectName("refreshBtn")
+        downStageBtn.setToolTip("選択した工程を下へ")
+        downStageBtn.clicked.connect(lambda: self._move_stage_row(1))
         srow.addWidget(addStageBtn)
         srow.addWidget(delStageBtn)
+        srow.addWidget(upStageBtn)
+        srow.addWidget(downStageBtn)
         srow.addStretch(1)
-        shint = QLabel("別工程へ保存＝現シーン名の『リネーム元→リネーム先』置換＋テイク/ローカル初期化。"
+        shint = QLabel("並び順（上→下）がショットリストの工程順・絞り込みの順になります。"
+                       "別工程へ保存＝現シーン名の『リネーム元→リネーム先』置換＋テイク/ローカル初期化。"
                        "例: 工程名=lay_pri / 工程フォルダ=ma/lay_pri / リネーム元=lay_pri / "
                        "リネーム先=anm_sec / テイク=t01 / ローカル=v001。"
                        "テイク/ローカルは任意（空欄＝現シーンの番号を据え置き／数字入り＝その値で初期化）。"
@@ -4106,6 +4189,23 @@ class ProjectSettingsDialog(QDialog):
         rows = sorted({i.row() for i in self.stageTable.selectedIndexes()}, reverse=True)
         for r in rows:
             self.stageTable.removeRow(r)
+
+    def _move_stage_row(self, delta):
+        """選択した工程行を delta（-1=上 / +1=下）方向へ入れ替える。並び順＝工程順。"""
+        t = self.stageTable
+        rows = sorted({i.row() for i in t.selectedIndexes()})
+        if not rows:
+            return
+        r = rows[0]
+        nr = r + delta
+        if nr < 0 or nr >= t.rowCount():
+            return
+        for c in range(t.columnCount()):
+            a = t.takeItem(r, c)
+            b = t.takeItem(nr, c)
+            t.setItem(r, c, b)
+            t.setItem(nr, c, a)
+        t.selectRow(nr)
 
     def _stages_from_table(self):
         out = []
