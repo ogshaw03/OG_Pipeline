@@ -1923,6 +1923,9 @@ class VideoPlayer(QWidget):
 
     def resume(self):
         """suspend 後、保持している動画/連番の再生を再開する。"""
+        # 既存の再生を必ず止めてから再開する。resume が二重に呼ばれても cv2 スレッドが
+        # 積み重なって複数スレッドが同じ画面へ描画＝映像が暴れるのを防ぐ。
+        self._stop_all()
         if self._path and _HAS_CV2:
             self._got_frame = False
             self._video_token += 1
