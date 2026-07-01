@@ -2038,8 +2038,10 @@ class GridVideoCell(QWidget):
     def __init__(self, title, media, stage="", on_click=None, payload=None,
                  title_color=None, folder=None, on_drill=None,
                  drill_label="⮞ リーブ", show_header=True, hover=True,
-                 cell_w=None, cell_h=None, badges=None, parent=None):
+                 cell_w=None, cell_h=None, badges=None, on_activate=None, parent=None):
         super().__init__(parent)
+        self._title_text = title
+        self._on_activate = on_activate
         # タイルサイズはインスタンスごとに上書き可（スライダーで可変）
         if cell_w:
             self.CELL_W = int(cell_w)
@@ -2456,6 +2458,17 @@ class GridVideoCell(QWidget):
                 pass
         super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        # ダブルクリックで元解像度ビューアを開く
+        if event.button() == Qt.LeftButton and self._on_activate and self._media:
+            try:
+                self._on_activate(self._media, self._title_text)
+            except Exception:
+                pass
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mouseMoveEvent(self, event):
         if self._scrubbing:
             self._scrub_to(event.pos().x())
@@ -2518,6 +2531,223 @@ class SafeComboBox(QComboBox):
             popup.move(x, y)
         except Exception:
             pass
+
+
+class VideoViewerDialog(QDialog):
+    """動画/連番を元解像度で表示し、タイムスライダでフレーム単位スクラブできるビューア。
+
+    mp4 は cv2 でデコード（縮小せず元解像度、表示はウィンドウに合わせて拡縮）。連番は
+    画像を直接表示。スライダ／◀|・|▶／←→キーでフレーム移動、▶/■ で再生。
+    """
+    def __init__(self, media, title="", fps=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title or "ビューア")
+        self.setWindowFlags(Qt.Window)
+        self.setStyleSheet(STYLE)
+        self.resize(1000, 660)
+        self._kind = media[0] if media else ""
+        self._src = media[1] if media else None
+        self._cap = None
+        self._total = 0
+        self._idx = 0
+        self._playing = False
+        self._fps = float(fps or maya_scene_fps() or 24.0)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._advance)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self._view = QLabel()
+        self._view.setAlignment(Qt.AlignCenter)
+        self._view.setStyleSheet("background: #000; color: #6b7794;")
+        self._view.setMinimumHeight(200)
+        lay.addWidget(self._view, 1)
+
+        bar = QWidget()
+        bar.setStyleSheet("background: #0a0d14; border-top: 1px solid #1e2435;")
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(10, 6, 10, 8)
+        h.setSpacing(8)
+        btn_style = ("QToolButton { background: #141824; color: #cdd6e4;"
+                     " border: 1px solid #2a3045; padding: 3px 9px; font-size: 13px; }"
+                     "QToolButton:hover { color: #e8c87a; border-color: #e8a838; }")
+        self._playBtn = QToolButton()
+        self._playBtn.setText("▶")
+        self._playBtn.setToolTip("再生 / 停止（Space）")
+        self._playBtn.setStyleSheet(btn_style)
+        self._playBtn.clicked.connect(self._toggle)
+        h.addWidget(self._playBtn)
+        prevB = QToolButton()
+        prevB.setText("◀|")
+        prevB.setToolTip("前のフレーム（←）")
+        prevB.setStyleSheet(btn_style)
+        prevB.clicked.connect(lambda: self._step(-1))
+        h.addWidget(prevB)
+        nextB = QToolButton()
+        nextB.setText("|▶")
+        nextB.setToolTip("次のフレーム（→）")
+        nextB.setStyleSheet(btn_style)
+        nextB.clicked.connect(lambda: self._step(1))
+        h.addWidget(nextB)
+        self._slider = QSlider(Qt.Horizontal)
+        self._slider.setSingleStep(1)
+        self._slider.setPageStep(1)
+        self._slider.valueChanged.connect(self._on_slider)
+        h.addWidget(self._slider, 1)
+        self._frameLbl = QLabel("0 / 0")
+        self._frameLbl.setStyleSheet("color: #6b7794; font-size: 11px;")
+        self._frameLbl.setMinimumWidth(90)
+        self._frameLbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        h.addWidget(self._frameLbl)
+        lay.addWidget(bar)
+
+        self._load()
+
+    def _load(self):
+        if self._kind in ("video", "ext"):
+            try:
+                import cv2
+                self._cap = cv2.VideoCapture(self._src)
+                if self._cap.isOpened():
+                    self._total = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+                    f = self._cap.get(cv2.CAP_PROP_FPS)
+                    if f and f > 0:
+                        self._fps = f
+                else:
+                    self._cap = None
+            except Exception:
+                self._cap = None
+                self._total = 0
+        elif self._kind == "seq":
+            self._total = len(self._src or [])
+        if self._total <= 0:
+            self._view.setText("この動画を表示できません（cv2 未導入、または読み込み失敗）")
+            self._slider.setEnabled(False)
+            self._playBtn.setEnabled(False)
+            return
+        self._slider.setRange(0, max(0, self._total - 1))
+        self._show(0)
+
+    def _paint(self, pm):
+        if pm and not pm.isNull():
+            self._view.setPixmap(pm.scaled(
+                max(1, self._view.width()), max(1, self._view.height()),
+                Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def _frame_pixmap(self, i):
+        if self._kind == "seq":
+            try:
+                return QPixmap(self._src[i])
+            except Exception:
+                return None
+        if self._cap is not None:
+            try:
+                import cv2
+                self._cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+                ok, frame = self._cap.read()
+                if ok:
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    hh, ww = rgb.shape[:2]
+                    return QPixmap.fromImage(
+                        QImage(rgb.data, ww, hh, 3 * ww, QImage.Format_RGB888).copy())
+            except Exception:
+                pass
+        return None
+
+    def _show(self, i):
+        if self._total <= 0:
+            return
+        i = max(0, min(int(i), self._total - 1))
+        self._idx = i
+        self._paint(self._frame_pixmap(i))
+        self._frameLbl.setText("%d / %d" % (i + 1, self._total))
+
+    def _on_slider(self, v):
+        if v != self._idx:
+            if self._playing:
+                self._pause()   # スクラブ中は停止
+            self._show(v)
+
+    def _set_index(self, i):
+        i = max(0, min(int(i), self._total - 1))
+        self._slider.blockSignals(True)
+        self._slider.setValue(i)
+        self._slider.blockSignals(False)
+        self._show(i)
+
+    def _step(self, d):
+        self._pause()
+        self._set_index(self._idx + d)
+
+    def _toggle(self):
+        self._pause() if self._playing else self._play()
+
+    def _play(self):
+        if self._total <= 1:
+            return
+        self._playing = True
+        self._playBtn.setText("■")
+        self._timer.start(max(8, int(1000.0 / max(1.0, self._fps))))
+
+    def _pause(self):
+        self._playing = False
+        self._playBtn.setText("▶")
+        self._timer.stop()
+
+    def _advance(self):
+        # 再生中はシーク無しの連続読みで滑らかに（連番はインデックス送り）
+        if self._kind == "seq":
+            self._set_index((self._idx + 1) % self._total)
+            return
+        if self._cap is None:
+            return
+        try:
+            import cv2
+            ok, frame = self._cap.read()
+            if not ok:
+                self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ok, frame = self._cap.read()
+                if not ok:
+                    return
+                self._idx = 0
+            else:
+                self._idx = (self._idx + 1) if self._idx + 1 < self._total else 0
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            hh, ww = rgb.shape[:2]
+            self._paint(QPixmap.fromImage(
+                QImage(rgb.data, ww, hh, 3 * ww, QImage.Format_RGB888).copy()))
+            self._slider.blockSignals(True)
+            self._slider.setValue(self._idx)
+            self._slider.blockSignals(False)
+            self._frameLbl.setText("%d / %d" % (self._idx + 1, self._total))
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._total > 0:
+            self._show(self._idx)
+
+    def keyPressEvent(self, event):
+        k = event.key()
+        if k == Qt.Key_Left:
+            self._step(-1); return
+        if k == Qt.Key_Right:
+            self._step(1); return
+        if k == Qt.Key_Space:
+            self._toggle(); return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        self._pause()
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
+        super().closeEvent(event)
 
 
 class AllShotsDialog(QDialog):
@@ -3048,7 +3278,8 @@ class AllShotsDialog(QDialog):
                                  badges=badges,
                                  on_click=self._select_shot, payload=s["folder"],
                                  folder=None, on_drill=None,
-                                 cell_w=cw, cell_h=ch, parent=content)
+                                 cell_w=cw, cell_h=ch,
+                                 on_activate=self._open_viewer, parent=content)
             grid.addWidget(cell, r, c, Qt.AlignLeft | Qt.AlignTop)
             self._cells.append(cell)
             c += 1
@@ -3114,8 +3345,10 @@ class AllShotsDialog(QDialog):
 
         # 最新動画（プレビュータイル。ヘッダー無し）
         # タイル自身は選択トリガにしない（クリックは行へ伝播して行選択になる）
+        # ダブルクリックで元解像度ビューアを開く
         cell = GridVideoCell(s.get("title", s["name"]), s["media"], show_header=False,
-                             cell_w=tw, cell_h=th, parent=row)
+                             cell_w=tw, cell_h=th,
+                             on_activate=self._open_viewer, parent=row)
         h.addWidget(cell, 0, Qt.AlignVCenter)
         self._cells.append(cell)
 
@@ -3198,6 +3431,22 @@ class AllShotsDialog(QDialog):
             self._side_cells.append(cell)
         self._side_layout.addStretch()
         QTimer.singleShot(0, self._update_visible)
+
+    def _open_viewer(self, media, title=""):
+        """タイルのダブルクリックで、元解像度＋フレームスクラブのビューアを開く。"""
+        if not media:
+            return
+        try:
+            dlg = VideoViewerDialog(media, title=title, fps=maya_scene_fps(), parent=self)
+            if not hasattr(self, "_viewers"):
+                self._viewers = []
+            self._viewers = [v for v in self._viewers if v.isVisible()]
+            self._viewers.append(dlg)
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+        except Exception as e:
+            print("[OG_Pipeline] ビューアを開けませんでした:", e)
 
     def _close_sidebar(self):
         """工程サイドバーを閉じる（中身を消してグリッドの再生を戻す）。"""
