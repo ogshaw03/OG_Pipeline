@@ -56,6 +56,7 @@ except ImportError:
 # ─── 定数 ────────────────────────────────────────────────────────────────────
 MAYA_EXTENSIONS = {".ma", ".mb"}
 WINDOW_OBJECT_NAME = "OGPipelineSceneOpenerWindow"   # 多重起動検出用の安定識別名
+SHOTLIST_OBJECT_NAME = "OGPipelineShotListWindow"    # ショットリスト単独起動用の識別名
 VIDEO_SUBDIR = "Pipeline_Movie"                      # プレイブラスト出力フォルダ名
 VIDEO_EXTS = [".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v"]
 
@@ -7053,26 +7054,82 @@ def _get_maya_main_window():
     return None
 
 
-def _close_existing_windows():
-    """既存の OG_Pipeline ウィンドウを objectName で検出して閉じる。
-
-    importlib.reload するとクラスが再定義され isinstance では旧ウィンドウを
-    検出できないため、文字列の objectName で判定する（reload 耐性）。
-    戻り値: 閉じた数。
-    """
+def _close_windows_named(name):
+    """指定 objectName のトップレベルウィンドウを閉じる（reload 耐性・戻り値=閉じた数）。"""
     app = QApplication.instance()
     if app is None:
         return 0
     closed = 0
     for widget in app.topLevelWidgets():
         try:
-            if widget.objectName() == WINDOW_OBJECT_NAME:
+            if widget.objectName() == name:
                 widget.close()
                 widget.deleteLater()
                 closed += 1
         except Exception:
             pass
     return closed
+
+
+def _close_existing_windows():
+    """既存の OG_Pipeline メインウィンドウを閉じる（多重起動/ reload 防止）。"""
+    return _close_windows_named(WINDOW_OBJECT_NAME)
+
+
+def _resolve_project_entry():
+    """ショットリスト用のプロジェクト設定を1件決める。
+    起動時プロジェクト→単一→複数なら選択ダイアログ。無ければ None。"""
+    roots = load_roots()
+    if not roots:
+        QMessageBox.warning(_get_maya_main_window(), "ショットリスト",
+                            "プロジェクトが登録されていません。\n"
+                            "メインツールの［プロジェクト設定］で登録してください。")
+        return None
+    name = get_startup_root()
+    entry = find_root_entry(name) if name else None
+    if entry is None:
+        if len(roots) == 1:
+            entry = roots[0]
+        else:
+            names = [r["name"] for r in roots]
+            choice, ok = QInputDialog.getItem(
+                _get_maya_main_window(), "ショットリスト",
+                "プロジェクトを選択:", names, 0, False)
+            if not ok or not choice:
+                return None
+            entry = find_root_entry(choice)
+    return entry
+
+
+def open_shot_list():
+    """ショットリスト（全ショットウィンドウ）だけをスタンドアロンで開く公開関数。
+
+    メインウィンドウを起動せず、登録済みプロジェクト（起動時設定→単一→選択）の
+    ショットフォルダ親を対象に全ショットウィンドウを表示する。
+    """
+    if QApplication.instance() is None:
+        print("[OG_Pipeline] エラー: Maya のスクリプトエディタから実行してください。")
+        return None
+    entry = _resolve_project_entry()
+    if entry is None:
+        return None
+    shots_parent = entry.get("shots_parent") or entry.get("path")
+    if not shots_parent or not os.path.isdir(str(shots_parent)):
+        QMessageBox.warning(_get_maya_main_window(), "ショットリスト",
+                            "ショットフォルダの親が見つかりません:\n%s" % shots_parent)
+        return None
+    _close_windows_named(SHOTLIST_OBJECT_NAME)
+    maya_main = _get_maya_main_window()
+    dlg = AllShotsDialog(shots_parent, parent=maya_main,
+                         stage_subpath=entry.get("stage_subpath", ""),
+                         stages=entry.get("stages", []),
+                         subpath_label=entry.get("subpath_label", ""))
+    dlg.setObjectName(SHOTLIST_OBJECT_NAME)
+    dlg.setWindowTitle("OG_Pipeline — ショットリスト（%s）" % entry.get("name", ""))
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
+    return dlg
 
 
 def main():
