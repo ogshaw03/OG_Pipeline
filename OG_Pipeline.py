@@ -3038,6 +3038,8 @@ class DetailPanel(QWidget):
         # 動画プレイヤー（シーンと同名のプレイブラストを再生）
         self._abs_path = ""
         self._shot_folder = ""
+        self._stages = []          # 工程設定（バッジ判定に使用）
+        self._stage_subpath = ""
         self.video = VideoPlayer()
         vwrap = QWidget()
         vlay = QVBoxLayout(vwrap)
@@ -3126,6 +3128,28 @@ class DetailPanel(QWidget):
         elif self._abs_path:
             self._show_media(self._abs_path)
 
+    def _stage_for_media(self, media_path, folder, stage_subpath):
+        """再生メディアが属する工程名を返す。工程設定があればその工程名（＝設定の name）を
+        優先し、無ければフォルダ名から判定する。"""
+        if not media_path:
+            return ""
+        stages = getattr(self, "_stages", None) or []
+        if stages:
+            mp = os.path.normcase(os.path.normpath(media_path))
+            for st in stages:
+                d = resolve_stage_dir(st, folder, stage_subpath)
+                if not d:
+                    continue
+                dn = os.path.normcase(os.path.normpath(d))
+                try:
+                    rel = os.path.relpath(mp, dn)
+                except Exception:
+                    continue
+                if not rel.startswith(".."):
+                    return st.get("name") or os.path.basename(d.rstrip("/\\"))
+        # フォールバック: フォルダ名から判定
+        return self._stage_of_path(media_path, folder, stage_subpath)
+
     @staticmethod
     def _stage_of_path(media_path, folder, stage_subpath):
         """再生メディアのパスから、それが属する工程フォルダ名を求める。無ければ ""。
@@ -3152,15 +3176,18 @@ class DetailPanel(QWidget):
             pass
         return ""
 
-    def show_folder_video(self, folder, stage_subpath="", is_shot=False, force=False):
+    def show_folder_video(self, folder, stage_subpath="", is_shot=False, force=False,
+                          stages=None):
         """選択フォルダ（ショット／工程）配下の最新メディアをサイドバーで再生する。
 
         cv2 があれば動画(mp4)を、無ければ Pipeline_Movie の連番を再生する。
-        ショットフォルダ選択時は、再生中の動画がどの工程のものかを表示する。
+        ショットフォルダ選択時は、再生中の動画がどの工程のものかを（工程設定を反映して）表示する。
         """
         # 同じフォルダの再選択ではチカつき防止のため作り直さない（force で強制更新）
         if not force and folder and folder == self._shot_folder and not self._abs_path:
             return
+        if stages is not None:
+            self._stages = stages
         self.setUpdatesEnabled(False)   # 破棄→再構築の中間描画を抑え、ちらつきを防ぐ
         try:
             self._abs_path = ""
@@ -3195,8 +3222,8 @@ class DetailPanel(QWidget):
             title.setWordWrap(True)
             self.contentLayout.addWidget(title)
 
-            # 再生中の動画がどの工程のものかを表示（ショット選択時）
-            stage = self._stage_of_path(media_path, folder, stage_subpath) if (is_shot and media_path) else ""
+            # 再生中の動画がどの工程のものかを表示（ショット選択時。工程設定を反映）
+            stage = self._stage_for_media(media_path, folder, stage_subpath) if (is_shot and media_path) else ""
             if stage:
                 badge = QLabel(f"工程:  {stage}")
                 badge.setStyleSheet(
@@ -5349,7 +5376,8 @@ class OGPipelineWindow(QWidget):
         label = "ショット" if is_shot else "フォルダ"
         self.selectedLabel.setText(f"{label}: {Path(folder).name}（配下の最新動画）")
         self.detailPanel.show_folder_video(
-            folder, getattr(self, "active_stage_subpath", ""), is_shot)
+            folder, getattr(self, "active_stage_subpath", ""), is_shot,
+            stages=getattr(self, "active_stages", []))
 
     # ════════════════════════════════════════════════════════════════════
     #  表示（カラム表示／再帰検索）
