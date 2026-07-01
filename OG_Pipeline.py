@@ -158,15 +158,19 @@ def find_latest_video_under(folder):
 
 
 def find_latest_sequence_under(folder):
-    """フォルダ配下で最新の連番画像（同一フォルダ内の画像群）を返す。無ければ None。
+    """フォルダ配下の Pipeline_Movie 内で最新の連番画像を返す。無ければ None。
 
-    工程フォルダ／ショットフォルダ配下の Pipeline_Movie/<stem>/ などを再帰探索し、
-    最も新しいフレームを含むフォルダの連番（ソート済み）を返す。
+    連番は Pipeline_Movie フォルダ配下のみを対象とする（他フォルダの連番＝別カットの
+    レンダ連番などは検出しない）。最も新しいフレームを含むフォルダの連番を返す。
     """
     if not folder or not os.path.isdir(folder):
         return None
+    sep = os.sep
     best = None  # (mtime, dirpath)
     for cur, dirs, files in os.walk(folder):
+        # Pipeline_Movie 配下でなければ連番は見ない（走査は続けるが対象外）
+        if VIDEO_SUBDIR not in os.path.normpath(cur).replace("/", sep).split(sep):
+            continue
         imgs = [f for f in files if os.path.splitext(f)[1].lower() in SEQ_EXTS]
         if not imgs:
             continue
@@ -1114,9 +1118,51 @@ class FrameDecodeThread(QThread):
         self._running = False
 
 
+_DECODE_MAX_ACTIVE = 3       # 同時デコード本数の上限（表示数は制限しない・CPU突入抑制）
+_DECODE_ACTIVE = [0]
+
+
+def _on_decode_done(key, frames):
+    if frames:
+        _frame_cache_put(key, frames)
+    pend = _FRAME_PENDING.pop(key, None)
+    if pend is not None:
+        if pend.get("started"):
+            _DECODE_ACTIVE[0] = max(0, _DECODE_ACTIVE[0] - 1)
+        for cb in pend["cbs"]:
+            try:
+                cb(frames)
+            except Exception:
+                pass
+    _pump_decode_queue()
+
+
+def _drop_decode_thread(th):
+    _LIVE_DECODE_THREADS.discard(th)
+    try:
+        th.deleteLater()
+    except Exception:
+        pass
+
+
+def _pump_decode_queue():
+    """未起動の保留デコードを、同時実行上限まで順に起動する（バースト抑制）。"""
+    for pend in _FRAME_PENDING.values():
+        if _DECODE_ACTIVE[0] >= _DECODE_MAX_ACTIVE:
+            break
+        if not pend.get("started"):
+            pend["started"] = True
+            _DECODE_ACTIVE[0] += 1
+            try:
+                pend["thread"].start()
+            except Exception:
+                _DECODE_ACTIVE[0] = max(0, _DECODE_ACTIVE[0] - 1)
+
+
 def request_video_frames(path, max_w, on_ready):
     """path の縮小フレーム列を取得。キャッシュにあれば即 on_ready(frames)。無ければ
-    1本だけデコードスレッドを起動し、完了時に同一キーの待ち受け全てへ通知する。"""
+    デコードを予約する。同時デコードは _DECODE_MAX_ACTIVE 本までに絞り、残りは順番待ち
+    にして起動時/スクロール時の CPU バーストを防ぐ（表示数そのものは制限しない）。"""
     key = _frame_key(path, max_w)
     fr = _frame_cache_get(key)
     if fr is not None:
@@ -1127,30 +1173,11 @@ def request_video_frames(path, max_w, on_ready):
         pend["cbs"].append(on_ready)
         return
     th = FrameDecodeThread(path, key, max_w)
-    _FRAME_PENDING[key] = {"thread": th, "cbs": [on_ready]}
-
-    def _finish(k, frames):
-        if frames:
-            _frame_cache_put(k, frames)
-        p = _FRAME_PENDING.pop(k, None)
-        if p:
-            for cb in p["cbs"]:
-                try:
-                    cb(frames)
-                except Exception:
-                    pass
-
-    def _drop(_th=th):
-        _LIVE_DECODE_THREADS.discard(_th)
-        try:
-            _th.deleteLater()
-        except Exception:
-            pass
-
-    th.done.connect(_finish)
-    th.finished.connect(_drop)
+    _FRAME_PENDING[key] = {"thread": th, "cbs": [on_ready], "started": False}
+    th.done.connect(_on_decode_done)
+    th.finished.connect(lambda _th=th: _drop_decode_thread(_th))
     _LIVE_DECODE_THREADS.add(th)
-    th.start()
+    _pump_decode_queue()
 
 
 def stop_all_decodes():
