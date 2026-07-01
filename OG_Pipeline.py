@@ -2533,6 +2533,32 @@ class SafeComboBox(QComboBox):
             pass
 
 
+class BookmarkSlider(QSlider):
+    """ブックマーク位置に目印（縦線）を描くタイムスライダ。"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.bookmarks = set()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        try:
+            lo, hi = self.minimum(), self.maximum()
+            if not self.bookmarks or hi <= lo:
+                return
+            p = QPainter(self)
+            p.setPen(QColor("#e8a838"))
+            w = max(1, self.width() - 1)
+            span = float(hi - lo)
+            top = 1
+            bot = max(2, self.height() - 2)
+            for bm in self.bookmarks:
+                x = int((bm - lo) / span * w)
+                p.drawLine(x, top, x, bot)
+            p.end()
+        except Exception:
+            pass
+
+
 class VideoViewerDialog(QDialog):
     """動画/連番を元解像度で表示し、タイムスライダでフレーム単位スクラブできるビューア。
 
@@ -2554,6 +2580,11 @@ class VideoViewerDialog(QDialog):
         self._fps = float(fps or maya_scene_fps() or 24.0)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._advance)
+        self._bookmarks = set()   # ブックマークしたフレーム番号
+        self._f_held = False      # f キー押下中か（f+矢印でブックマーク送り）
+        self._f_used = False      # f 押下中に矢印が使われたか（単押しはトグル）
+        # キーボード操作のためダイアログにフォーカスを保持（子は矢印/Space を奪わない）
+        self.setFocusPolicy(Qt.StrongFocus)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -2572,32 +2603,32 @@ class VideoViewerDialog(QDialog):
         btn_style = ("QToolButton { background: #141824; color: #cdd6e4;"
                      " border: 1px solid #2a3045; padding: 3px 9px; font-size: 13px; }"
                      "QToolButton:hover { color: #e8c87a; border-color: #e8a838; }")
-        self._playBtn = QToolButton()
-        self._playBtn.setText("▶")
-        self._playBtn.setToolTip("再生 / 停止（Space）")
-        self._playBtn.setStyleSheet(btn_style)
-        self._playBtn.clicked.connect(self._toggle)
-        h.addWidget(self._playBtn)
-        prevB = QToolButton()
-        prevB.setText("◀|")
-        prevB.setToolTip("前のフレーム（←）")
-        prevB.setStyleSheet(btn_style)
-        prevB.clicked.connect(lambda: self._step(-1))
-        h.addWidget(prevB)
-        nextB = QToolButton()
-        nextB.setText("|▶")
-        nextB.setToolTip("次のフレーム（→）")
-        nextB.setStyleSheet(btn_style)
-        nextB.clicked.connect(lambda: self._step(1))
-        h.addWidget(nextB)
-        self._slider = QSlider(Qt.Horizontal)
+
+        def _mk(text, tip, slot):
+            b = QToolButton()
+            b.setText(text)
+            b.setToolTip(tip)
+            b.setStyleSheet(btn_style)
+            b.setFocusPolicy(Qt.NoFocus)   # 矢印/Space はダイアログで処理する
+            b.clicked.connect(slot)
+            h.addWidget(b)
+            return b
+
+        self._playBtn = _mk("▶", "再生 / 停止（Space）", self._toggle)
+        _mk("◀|", "前のフレーム（←）", lambda: self._step(-1))
+        _mk("|▶", "次のフレーム（→）", lambda: self._step(1))
+        _mk("|◀★", "前のブックマーク（F+←）", lambda: self._goto_bookmark(-1))
+        self._bmBtn = _mk("★", "現在フレームをブックマーク（F）", self._toggle_bookmark)
+        _mk("★▶|", "次のブックマーク（F+→）", lambda: self._goto_bookmark(1))
+        self._slider = BookmarkSlider(Qt.Horizontal)
         self._slider.setSingleStep(1)
         self._slider.setPageStep(1)
+        self._slider.setFocusPolicy(Qt.NoFocus)
         self._slider.valueChanged.connect(self._on_slider)
         h.addWidget(self._slider, 1)
         self._frameLbl = QLabel("0 / 0")
         self._frameLbl.setStyleSheet("color: #6b7794; font-size: 11px;")
-        self._frameLbl.setMinimumWidth(90)
+        self._frameLbl.setMinimumWidth(110)
         self._frameLbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         h.addWidget(self._frameLbl)
         lay.addWidget(bar)
@@ -2655,13 +2686,17 @@ class VideoViewerDialog(QDialog):
                 pass
         return None
 
+    def _update_frame_label(self):
+        mark = "  ★" if self._idx in self._bookmarks else ""
+        self._frameLbl.setText("%d / %d%s" % (self._idx + 1, self._total, mark))
+
     def _show(self, i):
         if self._total <= 0:
             return
         i = max(0, min(int(i), self._total - 1))
         self._idx = i
         self._paint(self._frame_pixmap(i))
-        self._frameLbl.setText("%d / %d" % (i + 1, self._total))
+        self._update_frame_label()
 
     def _on_slider(self, v):
         if v != self._idx:
@@ -2720,9 +2755,32 @@ class VideoViewerDialog(QDialog):
             self._slider.blockSignals(True)
             self._slider.setValue(self._idx)
             self._slider.blockSignals(False)
-            self._frameLbl.setText("%d / %d" % (self._idx + 1, self._total))
+            self._update_frame_label()
         except Exception:
             pass
+
+    # ── ブックマーク ───────────────────────────────
+    def _toggle_bookmark(self):
+        if self._total <= 0:
+            return
+        if self._idx in self._bookmarks:
+            self._bookmarks.discard(self._idx)
+        else:
+            self._bookmarks.add(self._idx)
+        self._slider.bookmarks = self._bookmarks
+        self._slider.update()
+        self._update_frame_label()
+
+    def _goto_bookmark(self, direction):
+        if not self._bookmarks:
+            return
+        self._pause()
+        marks = sorted(self._bookmarks)
+        if direction > 0:
+            nxt = next((m for m in marks if m > self._idx), marks[0])   # 末尾以降は先頭へ巡回
+        else:
+            nxt = next((m for m in reversed(marks) if m < self._idx), marks[-1])
+        self._set_index(nxt)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2731,13 +2789,42 @@ class VideoViewerDialog(QDialog):
 
     def keyPressEvent(self, event):
         k = event.key()
+        if k == Qt.Key_F:
+            if not event.isAutoRepeat():
+                self._f_held = True
+                self._f_used = False
+            return
         if k == Qt.Key_Left:
-            self._step(-1); return
+            if self._f_held:
+                self._f_used = True
+                self._goto_bookmark(-1)   # F+← 前のブックマーク
+            else:
+                self._step(-1)            # ← 前のフレーム
+            return
         if k == Qt.Key_Right:
-            self._step(1); return
+            if self._f_held:
+                self._f_used = True
+                self._goto_bookmark(1)    # F+→ 次のブックマーク
+            else:
+                self._step(1)             # → 次のフレーム
+            return
         if k == Qt.Key_Space:
             self._toggle(); return
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_F and not event.isAutoRepeat():
+            # f 単押し（矢印と併用していない）＝現在フレームをブックマークのトグル
+            if self._f_held and not self._f_used:
+                self._toggle_bookmark()
+            self._f_held = False
+            self._f_used = False
+            return
+        super().keyReleaseEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.setFocus()   # キー操作を受け取れるようフォーカスを持たせる
 
     def closeEvent(self, event):
         self._pause()
