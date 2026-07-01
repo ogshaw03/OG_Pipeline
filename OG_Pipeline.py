@@ -1937,68 +1937,62 @@ class VideoPlayer(QWidget):
 class IdleReleaseMonitor(QtCore.QObject):
     """一定時間ユーザー操作が無ければ on_idle() を、操作再開で on_active() を呼ぶ。
 
-    アプリ全体の入力イベント（クリック/キー/ホイール/マウス移動）を監視してタイマーを
-    リセットする。無操作が続くと on_idle（＝再生停止しファイルロック解放）を実行し、
-    その後の操作で on_active（＝再生再開）を実行する。
+    以前はアプリ全体のイベントフィルタで入力を監視していたが、ウィンドウ破棄時に
+    フィルタが確実に外れず、QApplication が破棄済みオブジェクトを参照して Maya が
+    クラッシュする危険があった。そこで、自分（＝親ウィンドウ）が所有する QTimer で
+    グローバルなマウス位置を定期ポーリングする方式に変更（アプリへのフィルタ設置なし）。
+    タイマーは親と一緒に安全に破棄されるため、再起動/リロードでも落ちない。
     """
     def __init__(self, on_idle, on_active, interval_ms=60000, parent=None):
         super().__init__(parent)
         self._on_idle = on_idle
         self._on_active = on_active
         self._idle = False
+        self._interval = int(interval_ms)
+        self._elapsed = 0
+        self._last_pos = None
+        self._poll_ms = 2000
         self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.setInterval(int(interval_ms))
-        self._timer.timeout.connect(self._fire)
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
+        self._timer.setInterval(self._poll_ms)
+        self._timer.timeout.connect(self._check)
         self._timer.start()
 
-    _INPUT_TYPES = None
+    def _cursor_pos(self):
+        try:
+            return QtGui.QCursor.pos()
+        except Exception:
+            return None
 
-    def _input_types(self):
-        if IdleReleaseMonitor._INPUT_TYPES is None:
-            E = QtCore.QEvent
-            IdleReleaseMonitor._INPUT_TYPES = {
-                E.MouseMove, E.MouseButtonPress, E.MouseButtonRelease,
-                E.MouseButtonDblClick, E.KeyPress, E.Wheel,
-            }
-        return IdleReleaseMonitor._INPUT_TYPES
+    def _check(self):
+        pos = self._cursor_pos()
+        moved = (self._last_pos is None) or (pos is not None and pos != self._last_pos)
+        self._last_pos = pos
+        if moved:
+            self.notify_activity()
+        else:
+            self._elapsed += self._poll_ms
+            if not self._idle and self._elapsed >= self._interval:
+                self._idle = True
+                try:
+                    self._on_idle()
+                except Exception:
+                    pass
 
-    def _fire(self):
-        if not self._idle:
-            self._idle = True
+    def notify_activity(self):
+        """操作があったとみなしてカウントをリセット（必要なら外部からも呼べる）。"""
+        self._elapsed = 0
+        if self._idle:
+            self._idle = False
             try:
-                self._on_idle()
+                self._on_active()
             except Exception:
                 pass
-
-    def eventFilter(self, obj, ev):
-        try:
-            if ev.type() in self._input_types():
-                self._timer.start()   # カウントダウンをリセット
-                if self._idle:
-                    self._idle = False
-                    try:
-                        self._on_active()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        return False   # イベントは消費しない
 
     def stop(self):
         try:
             self._timer.stop()
         except Exception:
             pass
-        app = QApplication.instance()
-        if app is not None:
-            try:
-                app.removeEventFilter(self)
-            except Exception:
-                pass
 
 
 # ─── 全ショット動画一覧（グリッド・自動再生） ───────────────────────────────────
