@@ -2959,12 +2959,23 @@ class AllShotsDialog(QDialog):
         if getattr(self, "_playback_suspended", False) or \
                 getattr(self, "_idle_suspended", False):
             return   # 手動停止中／無操作停止中（削除可）は再生しない
-        for cell in self._all_cells():
+
+        def _is_visible(cell):
             try:
-                visible = not cell.visibleRegion().isEmpty()
+                return not cell.visibleRegion().isEmpty()
             except Exception:
-                visible = True
-            cell.play() if visible else cell.pause()
+                return True
+
+        # サイドバー表示中は、注視対象であるサイドバーの工程動画だけを再生し、
+        # グリッドは停止して同時デコード数を抑える（グリッド＋サイドバーの二重負荷を回避）。
+        if self._side_cells:
+            for cell in self._cells:
+                cell.pause()
+            for cell in self._side_cells:
+                cell.play() if _is_visible(cell) else cell.pause()
+        else:
+            for cell in self._cells:
+                cell.play() if _is_visible(cell) else cell.pause()
 
     def showEvent(self, event):
         super().showEvent(event)
