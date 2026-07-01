@@ -1016,6 +1016,152 @@ def _release_cv_thread(th):
         pass
 
 
+# ── 動画フレームの共有キャッシュ（クリップを一度だけ縮小デコードしRAMからループ）──
+# 多数のセルが個別に cv2 で連続デコードすると重い。クリップを1回だけ縮小デコードして
+# QImage 列にキャッシュし、各セルはそこからループ表示する（デコードは1回・複数セルで共有）。
+_FRAME_CACHE = {}            # key -> list[QImage]（挿入順＝LRU）
+_FRAME_CACHE_BYTES = [0]
+_FRAME_CACHE_MAX = 320 * 1024 * 1024   # 約320MB上限
+_FRAME_PENDING = {}          # key -> {"thread": QThread, "cbs": [fn, ...]}
+_LIVE_DECODE_THREADS = set()
+_FRAME_MAX_COUNT = 240       # 1クリップの最大保持フレーム数（メモリ・時間の上限）
+
+
+def _frame_key(path, max_w):
+    try:
+        mt = int(os.path.getmtime(path))
+    except Exception:
+        mt = 0
+    return (os.path.normcase(os.path.normpath(str(path))), mt, int(max_w or 0))
+
+
+def _img_bytes(im):
+    for attr in ("sizeInBytes", "byteCount"):
+        fn = getattr(im, attr, None)
+        if fn:
+            try:
+                return int(fn())
+            except Exception:
+                pass
+    try:
+        return im.width() * im.height() * 4
+    except Exception:
+        return 0
+
+
+def _frame_cache_get(key):
+    fr = _FRAME_CACHE.pop(key, None)
+    if fr is not None:
+        _FRAME_CACHE[key] = fr   # LRU: 末尾へ
+    return fr
+
+
+def _frame_cache_put(key, frames):
+    if not frames:
+        return
+    _FRAME_CACHE[key] = frames
+    _FRAME_CACHE_BYTES[0] += sum(_img_bytes(im) for im in frames)
+    while _FRAME_CACHE_BYTES[0] > _FRAME_CACHE_MAX and len(_FRAME_CACHE) > 1:
+        old_key = next(iter(_FRAME_CACHE))
+        old = _FRAME_CACHE.pop(old_key)
+        _FRAME_CACHE_BYTES[0] -= sum(_img_bytes(im) for im in old)
+
+
+class FrameDecodeThread(QThread):
+    """クリップを一度だけ縮小デコードして QImage 列を作り、完了時に done を1回発火する。"""
+    done = Signal(object, object)   # key, list[QImage]
+
+    def __init__(self, path, key, max_w, max_frames=_FRAME_MAX_COUNT, parent=None):
+        super().__init__(parent)
+        self._path = path
+        self._key = key
+        self._max_w = int(max_w) if max_w else 0
+        self._max_frames = int(max_frames)
+        self._running = True
+
+    def run(self):
+        frames = []
+        try:
+            import cv2
+        except Exception:
+            self.done.emit(self._key, frames)
+            return
+        cap = cv2.VideoCapture(self._path)
+        if cap.isOpened():
+            try:
+                while self._running and len(frames) < self._max_frames:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    h, w = frame.shape[:2]
+                    if self._max_w and w > self._max_w:
+                        nh = max(1, int(h * self._max_w / float(w)))
+                        frame = cv2.resize(frame, (self._max_w, nh))
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    hh, ww = rgb.shape[:2]
+                    frames.append(QImage(rgb.data, ww, hh, 3 * ww,
+                                         QImage.Format_RGB888).copy())
+            except Exception:
+                pass
+            finally:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+        self.done.emit(self._key, frames if self._running else [])
+
+    def stop(self):
+        self._running = False
+
+
+def request_video_frames(path, max_w, on_ready):
+    """path の縮小フレーム列を取得。キャッシュにあれば即 on_ready(frames)。無ければ
+    1本だけデコードスレッドを起動し、完了時に同一キーの待ち受け全てへ通知する。"""
+    key = _frame_key(path, max_w)
+    fr = _frame_cache_get(key)
+    if fr is not None:
+        on_ready(fr)
+        return
+    pend = _FRAME_PENDING.get(key)
+    if pend is not None:
+        pend["cbs"].append(on_ready)
+        return
+    th = FrameDecodeThread(path, key, max_w)
+    _FRAME_PENDING[key] = {"thread": th, "cbs": [on_ready]}
+
+    def _finish(k, frames):
+        if frames:
+            _frame_cache_put(k, frames)
+        p = _FRAME_PENDING.pop(k, None)
+        if p:
+            for cb in p["cbs"]:
+                try:
+                    cb(frames)
+                except Exception:
+                    pass
+
+    def _drop(_th=th):
+        _LIVE_DECODE_THREADS.discard(_th)
+        try:
+            _th.deleteLater()
+        except Exception:
+            pass
+
+    th.done.connect(_finish)
+    th.finished.connect(_drop)
+    _LIVE_DECODE_THREADS.add(th)
+    th.start()
+
+
+def stop_all_decodes():
+    """保留中のデコードスレッドを停止する（ウィンドウ閉時などのクリーンアップ）。"""
+    for pend in list(_FRAME_PENDING.values()):
+        try:
+            pend["thread"].stop()
+        except Exception:
+            pass
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  ルート設定の永続化（JSON）
 #  Playblast ツールと同じ方針: optionVar ではなく通常ファイルに保存する。
@@ -1898,6 +2044,9 @@ class GridVideoCell(QWidget):
         self._scrub_cap = None
         self._scrub_total = 0
         self._video_path = None
+        self._mem_frames = None     # RAM 上の縮小フレーム列（共有キャッシュ由来）
+        self._mem_timer = None
+        self._mem_token = 0
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(2)
@@ -2024,7 +2173,9 @@ class GridVideoCell(QWidget):
             return
         kind = self._media[0]
         if kind == "video":
-            self._playing = self._start_cv2(self._media[1])
+            # 一度だけデコード→RAMからループ（多数同時でも軽い・デコードは共有）
+            self._playing = True
+            self._start_mem_video(self._media[1])
         elif kind == "seq" and len(self._frames) > 1:
             if self._seq_timer is None:
                 self._seq_timer = QTimer(self)
@@ -2038,8 +2189,53 @@ class GridVideoCell(QWidget):
         self._playing = False
         if self._seq_timer:
             self._seq_timer.stop()
+        if self._mem_timer:
+            self._mem_timer.stop()
+        self._mem_token += 1   # 保留中のデコード結果コールバックを無効化
         self._stop_thread()
         self._update_toggle_icon()
+
+    # メモリ再生（クリップを一度だけ縮小デコードして RAM からループ）
+    def _decode_max_w(self):
+        # デコード解像度を抑える（メモリ・初回デコード負荷を削減）
+        return min(int(self.CELL_W) or 240, 256)
+
+    def _start_mem_video(self, path):
+        self._video_path = path
+        self._mem_token += 1
+        token = self._mem_token
+
+        def on_ready(frames, _tok=token):
+            try:
+                if _tok != self._mem_token or not self._playing:
+                    return
+                self._mem_frames = frames
+                if frames:
+                    self._idx = 0
+                    if self._mem_timer is None:
+                        self._mem_timer = QTimer(self)
+                        self._mem_timer.timeout.connect(self._next_mem)
+                    self._mem_timer.start(
+                        max(8, int(1000.0 / max(1.0, maya_scene_fps()))))
+                    self._show_mem(0)
+            except RuntimeError:
+                pass   # セルが破棄済み
+
+        request_video_frames(path, self._decode_max_w(), on_ready)
+
+    def _next_mem(self):
+        if not self._mem_frames:
+            return
+        self._idx = (self._idx + 1) % len(self._mem_frames)
+        self._show_mem(self._idx)
+
+    def _show_mem(self, i):
+        try:
+            im = self._mem_frames[i]
+            self._view.setPixmap(QPixmap.fromImage(im).scaled(
+                self.CELL_W - 8, self.CELL_H, Qt.KeepAspectRatio, Qt.FastTransformation))
+        except Exception:
+            pass
 
     def _toggle_play(self):
         if self._playing:
@@ -2399,9 +2595,24 @@ class AllShotsDialog(QDialog):
         sv = QVBoxLayout(side)
         sv.setContentsMargins(0, 0, 0, 0)
         sv.setSpacing(0)
+        # サイドバー見出し＋閉じるボタン（閉じるとグリッドの再生が戻る）
+        head_w = QWidget()
+        head_w.setObjectName("detailTitle")
+        hrow = QHBoxLayout(head_w)
+        hrow.setContentsMargins(10, 0, 6, 0)
         self._sideTitle = QLabel("◈  工程別（タイルを選択）")
-        self._sideTitle.setObjectName("detailTitle")
-        sv.addWidget(self._sideTitle)
+        hrow.addWidget(self._sideTitle, 1)
+        self._sideCloseBtn = QToolButton()
+        self._sideCloseBtn.setText("✕")
+        self._sideCloseBtn.setToolTip("工程サイドバーを閉じる")
+        self._sideCloseBtn.setStyleSheet(
+            "QToolButton { background: transparent; color: #6b7794; border: none;"
+            " font-size: 15px; padding: 2px 6px; }"
+            "QToolButton:hover { color: #e8a838; }")
+        self._sideCloseBtn.clicked.connect(self._close_sidebar)
+        self._sideCloseBtn.hide()   # 選択して中身が出たら表示
+        hrow.addWidget(self._sideCloseBtn, 0)
+        sv.addWidget(head_w)
         self._side_content = QWidget()
         self._side_layout = QVBoxLayout(self._side_content)
         self._side_layout.setContentsMargins(10, 10, 10, 10)
@@ -2411,6 +2622,7 @@ class AllShotsDialog(QDialog):
         side_scroll.setWidgetResizable(True)
         side_scroll.setWidget(self._side_content)
         side_scroll.verticalScrollBar().valueChanged.connect(self._update_visible)
+        self._side_scroll = side_scroll
         sv.addWidget(side_scroll, 1)
         splitter.addWidget(side)
         # グリッド側に 5 列ぶん（約 1130px）を割り当てる
@@ -2912,6 +3124,7 @@ class AllShotsDialog(QDialog):
             if it.widget():
                 it.widget().deleteLater()
         self._sideTitle.setText(f"◈  {Path(folder).name} — 工程別")
+        self._sideCloseBtn.show()
         stages = self._stage_media_list(folder)
         if not stages:
             self._side_layout.addWidget(QLabel("工程フォルダに動画が見つかりません"))
@@ -2924,15 +3137,35 @@ class AllShotsDialog(QDialog):
         def _dir_for(name):
             return dirs_map.get(name, "")
 
+        # サイドバー幅いっぱいにタイルを広げる（右側の空白をなくす）
+        try:
+            sw = self._side_scroll.viewport().width()
+        except Exception:
+            sw = 0
+        cw = max(180, (sw or 320) - 20)
+        ch = max(90, int(cw * 90 / 208))
+
         for stage_name, media, _mt in order:
             cell = GridVideoCell(stage_name, media, title_color=stage_color(stage_name),
                                  folder=_dir_for(stage_name),
                                  on_drill=self._drill_to, hover=False,
-                                 parent=self._side_content)
+                                 cell_w=cw, cell_h=ch, parent=self._side_content)
             self._side_layout.addWidget(cell)
             self._side_cells.append(cell)
         self._side_layout.addStretch()
         QTimer.singleShot(0, self._update_visible)
+
+    def _close_sidebar(self):
+        """工程サイドバーを閉じる（中身を消してグリッドの再生を戻す）。"""
+        self._clear_cells(self._side_cells, self._side_layout)
+        while self._side_layout.count():
+            it = self._side_layout.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        self._side_layout.addStretch()
+        self._sideTitle.setText("◈  工程別（タイルを選択）")
+        self._sideCloseBtn.hide()
+        self._update_visible()
 
     def _drill_to(self, folder):
         """親（メインウィンドウ）のブラウザでこの工程フォルダを開く。"""
@@ -2960,22 +3193,13 @@ class AllShotsDialog(QDialog):
                 getattr(self, "_idle_suspended", False):
             return   # 手動停止中／無操作停止中（削除可）は再生しない
 
-        def _is_visible(cell):
+        # メモリ再生（デコードは1回・共有）なのでグリッドとサイドバーを同時に再生しても軽い。
+        for cell in self._all_cells():
             try:
-                return not cell.visibleRegion().isEmpty()
+                visible = not cell.visibleRegion().isEmpty()
             except Exception:
-                return True
-
-        # サイドバー表示中は、注視対象であるサイドバーの工程動画だけを再生し、
-        # グリッドは停止して同時デコード数を抑える（グリッド＋サイドバーの二重負荷を回避）。
-        if self._side_cells:
-            for cell in self._cells:
-                cell.pause()
-            for cell in self._side_cells:
-                cell.play() if _is_visible(cell) else cell.pause()
-        else:
-            for cell in self._cells:
-                cell.play() if _is_visible(cell) else cell.pause()
+                visible = True
+            cell.play() if visible else cell.pause()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -3026,6 +3250,7 @@ class AllShotsDialog(QDialog):
         except Exception:
             pass
         self.stop_all()
+        stop_all_decodes()
         super().closeEvent(event)
 
 
