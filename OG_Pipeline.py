@@ -3855,6 +3855,7 @@ class ProjectSettingsDialog(QDialog):
         self.setMinimumSize(820, 600)
         entry = entry or {}
         self.imported = False   # ダイアログ内でインポートしたか（呼び出し側が再読込）
+        self.deleted = False    # ダイアログ内でプロジェクトを削除したか
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 14, 16, 14)
@@ -3877,6 +3878,11 @@ class ProjectSettingsDialog(QDialog):
         self.projectCombo.setCurrentIndex(ci if ci >= 0 else self.projectCombo.count() - 1)
         self.projectCombo.activated.connect(self._on_project_selected)
         psel.addWidget(self.projectCombo, 1)
+        self.deleteProjectBtn = QPushButton("🗑 削除")
+        self.deleteProjectBtn.setObjectName("refreshBtn")
+        self.deleteProjectBtn.setToolTip("選択中のプロジェクト登録を削除（ディスク上のファイルは消しません）")
+        self.deleteProjectBtn.clicked.connect(self._delete_project)
+        psel.addWidget(self.deleteProjectBtn)
         outer.addLayout(psel)
 
         form = QFormLayout()
@@ -4157,6 +4163,37 @@ class ProjectSettingsDialog(QDialog):
             return
         entry = find_root_entry(name) or {}
         self._load_project(entry)
+
+    def _delete_project(self):
+        """選択中の既存プロジェクトの登録を削除する（ファイル自体は消さない）。"""
+        name = self.projectCombo.currentData()
+        if not name:
+            QMessageBox.information(
+                self, "プロジェクト削除",
+                "削除できる既存プロジェクトが選択されていません（新規は削除不要です）。")
+            return
+        r = QMessageBox.question(
+            self, "プロジェクト削除",
+            "プロジェクト『%s』の登録を削除しますか？\n"
+            "（この操作は登録一覧から消すだけで、ディスク上のファイルは削除しません）" % name,
+            QMessageBox.Yes | QMessageBox.No)
+        if r != QMessageBox.Yes:
+            return
+        remove_root(name)
+        if get_startup_root() == name:
+            clear_startup_root()
+        self.deleted = True
+        # プルダウンとフォームを更新（削除後は新規状態にする）
+        self._all_roots = load_roots()
+        self.projectCombo.blockSignals(True)
+        self.projectCombo.clear()
+        for rr in self._all_roots:
+            self.projectCombo.addItem(rr["name"], rr["name"])
+        self.projectCombo.addItem("＋ 新規プロジェクト", None)
+        self.projectCombo.setCurrentIndex(self.projectCombo.count() - 1)
+        self.projectCombo.blockSignals(False)
+        self._load_project({})
+        QMessageBox.information(self, "プロジェクト削除", "『%s』を削除しました。" % name)
 
     def _load_project(self, entry):
         """フォーム各欄を entry の内容で更新する。"""
@@ -5252,12 +5289,14 @@ class OGPipelineWindow(QWidget):
             sub = v["stage_subpath"] or "（ショット直下）"
             self.statusLabel.setText(
                 f"✓  プロジェクト保存: {v['name']}（ショット親: {v['shots_parent']} ／ 工程サブパス: {sub}）")
-        elif dlg.imported:
-            # OK されなくてもインポートで増えた分を反映
+        elif dlg.imported or dlg.deleted:
+            # OK されなくても、インポート/削除で変わった一覧を反映
             self._reload_roots_combo(select_name=cur_name)
             self._select_in_combo(cur_name)
             self._apply_root()
-            self.statusLabel.setText("✓  プロジェクト設定をインポートしました")
+            self.statusLabel.setText(
+                "✓  プロジェクト設定をインポートしました" if dlg.imported
+                else "✓  プロジェクトを削除しました")
 
     # ── フォルダ選択（配下の最新動画を表示） ───────────────
     def _is_shot_folder(self, folder):
