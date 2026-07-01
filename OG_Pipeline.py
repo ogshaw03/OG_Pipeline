@@ -2652,7 +2652,12 @@ class AllShotsDialog(QDialog):
     def _sorted_shot_data(self):
         data = list(self._shot_data)
         if self._sort_mode == "stage":
-            data.sort(key=lambda s: (s["stage"].lower(), s["name"].lower()))
+            # 工程順（lay→anm→その他）でグループ化し、同工程内はショット名順。
+            # 「<キャラ>/<工程>」形式は末尾（工程）で判定する。
+            def key(s):
+                stg = (s.get("stage") or "").split("/")[-1]
+                return (_stage_rank(stg), stg.lower(), s["name"].lower())
+            data.sort(key=key)
         else:
             data.sort(key=lambda s: s["name"].lower())
         return data
