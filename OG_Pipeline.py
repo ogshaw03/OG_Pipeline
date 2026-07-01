@@ -1278,14 +1278,14 @@ def set_pending_cv2_uninstall(value):
 
 def get_grid_cols():
     try:
-        return min(7, max(5, int(_read_config().get("allshots_grid_cols", 5))))
+        return min(7, max(3, int(_read_config().get("allshots_grid_cols", 5))))
     except Exception:
         return 5
 
 
 def set_grid_cols(n):
     cfg = _read_config()
-    cfg["allshots_grid_cols"] = min(7, max(5, int(n)))
+    cfg["allshots_grid_cols"] = min(7, max(3, int(n)))
     _write_config(cfg)
 
 
@@ -2713,7 +2713,7 @@ class AllShotsDialog(QDialog):
             self._sizeSlider.setValue(self._list_rows)
             self._sizeLabel.setText("表示数 %d" % self._list_rows)
         else:
-            self._sizeSlider.setRange(5, 7)
+            self._sizeSlider.setRange(3, 7)
             self._sizeSlider.setValue(self._grid_cols)
             self._sizeLabel.setText("列数 %d" % self._grid_cols)
         self._sizeSlider.blockSignals(False)
