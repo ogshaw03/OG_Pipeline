@@ -2824,8 +2824,9 @@ class AllShotsDialog(QDialog):
     COLS = 5
 
     def __init__(self, shots_parent, parent=None, stage_subpath="", stages=None,
-                 subpath_label=""):
+                 subpath_label="", standalone=False):
         super().__init__(parent)
+        self._standalone = standalone   # True: 画面内にプロジェクト選択バーを出す
         self._stage_subpath = stage_subpath or ""
         self._stages = stages or []   # 工程設定（あれば優先して使う）
         self._subpath_label = subpath_label or ""   # サブパスの呼称（例: キャラ）
@@ -2846,6 +2847,10 @@ class AllShotsDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
+
+        # ── プロジェクトバー（スタンドアロン時のみ。開いた後にUIから設定/切替） ──
+        if self._standalone:
+            outer.addWidget(self._build_project_bar())
 
         # ── ヘッダー（タイトル＋ソート） ──
         hbar = QWidget()
@@ -3525,6 +3530,96 @@ class AllShotsDialog(QDialog):
         self._sideTitle.setText("◈  工程別（タイルを選択）")
         self._sideCloseBtn.hide()
         self._update_visible()
+
+    # ── スタンドアロン用: プロジェクト選択バー ─────────────
+    def _build_project_bar(self):
+        bar = QWidget()
+        bar.setObjectName("toolbar")
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(10, 6, 10, 4)
+        h.setSpacing(8)
+        h.addWidget(QLabel("プロジェクト:"))
+        self._projCombo = SafeComboBox()
+        self._projCombo.setMinimumWidth(220)
+        self._projCombo.setToolTip("登録済みプロジェクトを選択して表示を切り替えます")
+        self._projCombo.activated.connect(self._on_project_combo)
+        h.addWidget(self._projCombo)
+        btn_style = ("QToolButton { background:#141824; color:#cdd6e4;"
+                     " border:1px solid #2a3045; padding:4px 10px; }"
+                     "QToolButton:hover { color:#e8c87a; border-color:#e8a838; }")
+        folderBtn = QToolButton()
+        folderBtn.setText("\U0001F4C2 フォルダ")
+        folderBtn.setToolTip("ショットフォルダの親を直接開く（この直下がショット）")
+        folderBtn.setStyleSheet(btn_style)
+        folderBtn.clicked.connect(self._pick_folder_project)
+        h.addWidget(folderBtn)
+        importBtn = QToolButton()
+        importBtn.setText("⭳ 設定取込")
+        importBtn.setToolTip("プロジェクト設定(JSON)を取り込む")
+        importBtn.setStyleSheet(btn_style)
+        importBtn.clicked.connect(self._import_config)
+        h.addWidget(importBtn)
+        h.addStretch(1)
+        self._reload_project_combo()
+        return bar
+
+    def _reload_project_combo(self, select_name=None):
+        if not hasattr(self, "_projCombo"):
+            return
+        self._projCombo.blockSignals(True)
+        self._projCombo.clear()
+        self._projCombo.addItem("（プロジェクトを選択）", None)
+        for r in load_roots():
+            self._projCombo.addItem(r["name"], r["name"])
+        if select_name:
+            idx = self._projCombo.findData(select_name)
+            if idx >= 0:
+                self._projCombo.setCurrentIndex(idx)
+        self._projCombo.blockSignals(False)
+
+    def _on_project_combo(self, _idx):
+        name = self._projCombo.currentData()
+        if not name:
+            return
+        entry = find_root_entry(name)
+        if entry:
+            self.set_project(entry.get("shots_parent") or entry.get("path"),
+                             entry.get("stage_subpath", ""), entry.get("stages", []),
+                             entry.get("subpath_label", ""), name)
+
+    def _pick_folder_project(self):
+        d = QFileDialog.getExistingDirectory(
+            self, "ショットフォルダの親を選択（この直下がショット）")
+        if d:
+            self._reload_project_combo()   # プルダウンは「選択」に戻す
+            self.set_project(d, "", [], "", os.path.basename(d.rstrip("/\\")) or d)
+
+    def _import_config(self):
+        fp, _ = QFileDialog.getOpenFileName(
+            self, "プロジェクト設定を取り込む", "", "JSON (*.json);;すべて (*.*)")
+        if not fp:
+            return
+        try:
+            n = import_roots_file(fp)
+            QMessageBox.information(self, "取り込み", "%d 件を取り込みました。" % n)
+            self._reload_project_combo()
+        except Exception as e:
+            QMessageBox.warning(self, "取り込み失敗", str(e))
+
+    def set_project(self, shots_parent, stage_subpath="", stages=None,
+                    subpath_label="", name=""):
+        """表示対象プロジェクトを切り替えて一覧を作り直す（スタンドアロンUIから呼ぶ）。"""
+        self.stop_all()
+        self._close_sidebar()
+        self._shots_parent = shots_parent or ""
+        self._stage_subpath = stage_subpath or ""
+        self._stages = stages or []
+        self._subpath_label = subpath_label or ""
+        self._stage_filter = None
+        self._collect_data()
+        self._refresh_filter_combo()
+        if name:
+            self.setWindowTitle("OG ショットリスト — %s" % name)
 
     def _drill_to(self, folder):
         """親（メインウィンドウ）のブラウザでこの工程フォルダを開く。
@@ -7079,31 +7174,6 @@ def _close_existing_windows():
     return _close_windows_named(WINDOW_OBJECT_NAME)
 
 
-def _resolve_project_entry():
-    """ショットリスト用のプロジェクト設定を1件決める。
-    起動時プロジェクト→単一→複数なら選択ダイアログ。無ければ None。"""
-    roots = load_roots()
-    if not roots:
-        QMessageBox.warning(_get_maya_main_window(), "ショットリスト",
-                            "プロジェクトが登録されていません。\n"
-                            "メインツールの［プロジェクト設定］で登録してください。")
-        return None
-    name = get_startup_root()
-    entry = find_root_entry(name) if name else None
-    if entry is None:
-        if len(roots) == 1:
-            entry = roots[0]
-        else:
-            names = [r["name"] for r in roots]
-            choice, ok = QInputDialog.getItem(
-                _get_maya_main_window(), "ショットリスト",
-                "プロジェクトを選択:", names, 0, False)
-            if not ok or not choice:
-                return None
-            entry = find_root_entry(choice)
-    return entry
-
-
 def open_shot_list():
     """ショットリスト（全ショットウィンドウ）だけをスタンドアロンで開く公開関数。
 
@@ -7113,22 +7183,30 @@ def open_shot_list():
     if QApplication.instance() is None:
         print("[OG_Pipeline] エラー: Maya のスクリプトエディタから実行してください。")
         return None
-    entry = _resolve_project_entry()
-    if entry is None:
-        return None
-    shots_parent = entry.get("shots_parent") or entry.get("path")
-    if not shots_parent or not os.path.isdir(str(shots_parent)):
-        QMessageBox.warning(_get_maya_main_window(), "ショットリスト",
-                            "ショットフォルダの親が見つかりません:\n%s" % shots_parent)
-        return None
+    # 初期表示は起動時プロジェクト（無ければ単一）を使い、以降は画面内バーで切替。
+    roots = load_roots()
+    name = get_startup_root()
+    entry = find_root_entry(name) if name else None
+    if entry is None and len(roots) == 1:
+        entry = roots[0]
     _close_windows_named(SHOTLIST_OBJECT_NAME)
     maya_main = _get_maya_main_window()
-    dlg = AllShotsDialog(shots_parent, parent=maya_main,
-                         stage_subpath=entry.get("stage_subpath", ""),
-                         stages=entry.get("stages", []),
-                         subpath_label=entry.get("subpath_label", ""))
+    if entry:
+        dlg = AllShotsDialog(entry.get("shots_parent") or entry.get("path"),
+                             parent=maya_main,
+                             stage_subpath=entry.get("stage_subpath", ""),
+                             stages=entry.get("stages", []),
+                             subpath_label=entry.get("subpath_label", ""),
+                             standalone=True)
+        dlg.setWindowTitle("OG_Pipeline — ショットリスト（%s）" % entry.get("name", ""))
+        try:
+            dlg._reload_project_combo(select_name=entry.get("name"))
+        except Exception:
+            pass
+    else:
+        dlg = AllShotsDialog("", parent=maya_main, standalone=True)
+        dlg.setWindowTitle("OG_Pipeline — ショットリスト")
     dlg.setObjectName(SHOTLIST_OBJECT_NAME)
-    dlg.setWindowTitle("OG_Pipeline — ショットリスト（%s）" % entry.get("name", ""))
     dlg.show()
     dlg.raise_()
     dlg.activateWindow()
