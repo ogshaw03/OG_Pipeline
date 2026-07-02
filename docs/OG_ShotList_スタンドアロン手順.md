@@ -99,12 +99,17 @@ python OG_ShotList.py
 ```bat
 pip install pyinstaller PySide2 opencv-python
 pyinstaller --noconfirm --onefile --windowed --name OG_ShotList ^
+  --hidden-import OG_Pipeline --paths . ^
   --exclude-module PySide6 ^
   OG_ShotList.py
 ```
 - 生成物: `dist\OG_ShotList.exe`（単体配布可）
-- `OG_Pipeline.py` は自動同梱されます。されない場合は
-  `--hidden-import OG_Pipeline` または `--add-data "OG_Pipeline.py;."` を追加。
+- **`--hidden-import OG_Pipeline` は必須級**：これが無いと exe 実行時に
+  `ModuleNotFoundError: No module named 'OG_Pipeline'` になります。`OG_Pipeline.py` を
+  同梱し、その依存（PySide/OpenCV 等）も解析させるために付けます。
+- `--paths .`：`OG_Pipeline.py` があるフォルダ（=カレント）を探索対象に加える保険。
+- 必ず **`OG_ShotList.py` と `OG_Pipeline.py` が同じフォルダにある状態**で、その
+  フォルダをカレントにして実行してください。
 - `--windowed`: 実行時のコンソール窓を出さない（デバッグ時は外すとログが見えます）。
 - アイコンを付けるなら `--icon app.ico`。
 - PySide2 と PySide6 の両方が環境にあると容量が増えるので、使う方だけ残し他方を
@@ -117,6 +122,7 @@ pyinstaller --noconfirm --onefile --windowed --name OG_ShotList ^
 | 症状 | 対処 |
 |---|---|
 | `ModuleNotFoundError: PySide2` | `pip install PySide2`（または PySide6）。exe 版なら不要 |
+| exe 実行時 `No module named 'OG_Pipeline'` | ビルドに `--hidden-import OG_Pipeline` を付け、`OG_Pipeline.py` と同じフォルダで再ビルド |
 | 一覧に何も出ない | 「ショットフォルダの親」が正しいか確認。直下のフォルダがショットとして扱われます |
 | mp4 が再生されず「外部で再生」になる | `opencv-python` を入れる（`pip install opencv-python`）。exe はビルド時に同梱 |
 | プロジェクトが選べない | 設定 JSON を「⭳ 設定(JSON)を取り込む…」で読み込むか、「📂 フォルダを直接開く…」を使う |

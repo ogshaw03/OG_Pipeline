@@ -25,8 +25,15 @@ try:
 except ImportError:
     from PySide6.QtWidgets import QApplication
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import OG_Pipeline as ogp   # noqa: E402
+# OG_Pipeline を import する。スクリプト実行時は同じフォルダから、PyInstaller の
+# 凍結 exe では同梱モジュール（無ければ展開先 _MEIPASS）から読み込む。
+try:
+    import OG_Pipeline as ogp   # 凍結 exe で同梱済みならこれで通る
+except ModuleNotFoundError:
+    _base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    if _base not in sys.path:
+        sys.path.insert(0, _base)
+    import OG_Pipeline as ogp   # noqa: E402
 
 
 def main():
