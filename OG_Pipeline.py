@@ -59,7 +59,7 @@ WINDOW_OBJECT_NAME = "OGPipelineSceneOpenerWindow"   # 多重起動検出用の�
 SHOTLIST_OBJECT_NAME = "OGPipelineShotListWindow"    # ショットリスト単独起動用の識別名
 
 # バージョン（install.py の before/after 表示・ヘッダー表示に使用）
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # GitHub 配布・自動更新（install.py と同一値にすること）
 _GH_OWNER = "ogshaw03"
@@ -5859,10 +5859,12 @@ class OGPipelineWindow(QWidget):
         self.saveAsBtn.clicked.connect(self._save_scene_as)
         ab_layout.addWidget(self.saveAsBtn)
 
-        # 現在リーブ（表示）中のフォルダに新規シーンを保存
+        # 現在開いているシーンを、命名規則の名前（編集可）でリーブ中フォルダに保存
         self.saveNewBtn = QPushButton("✚  SAVE NEW SCENE")
         self.saveNewBtn.setObjectName("refreshBtn")
-        self.saveNewBtn.setToolTip("現在ブラウザで開いている（リーブ中の）フォルダに新規シーンを保存")
+        self.saveNewBtn.setToolTip(
+            "現在開いているシーンを、命名規則の名前を初期値にした名前で保存"
+            "（リーブ中のフォルダ／名前は編集可・空シーンにはしません）")
         self.saveNewBtn.clicked.connect(self._save_new_scene)
         ab_layout.addWidget(self.saveNewBtn)
 
@@ -7004,60 +7006,109 @@ class OGPipelineWindow(QWidget):
                 return
         self.statusLabel.setText("Maya の『Save Scene As』を開きました")
 
+    def _prompt_save_name(self, default_name, target):
+        """ファイル名入力ダイアログ（命名規則の名前を初期値・編集可・保存ボタン）。
+        戻り値: 入力名（trim 済み） / キャンセルで None。"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("保存")
+        dlg.setStyleSheet(STYLE)
+        dlg.setMinimumWidth(460)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(16, 14, 16, 12)
+        v.setSpacing(8)
+        info = QLabel("保存先: %s" % target)
+        info.setStyleSheet("color: #6b7794; font-size: 11px;")
+        info.setWordWrap(True)
+        v.addWidget(info)
+        v.addWidget(QLabel("ファイル名（命名規則の名前が入っています。必要なら変更）:"))
+        edit = QLineEdit(default_name)
+        v.addWidget(edit)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancelB = QPushButton("キャンセル")
+        cancelB.setObjectName("refreshBtn")
+        cancelB.clicked.connect(dlg.reject)
+        row.addWidget(cancelB)
+        saveB = QPushButton("保存")
+        saveB.setObjectName("openBtn")
+        saveB.clicked.connect(dlg.accept)
+        row.addWidget(saveB)
+        v.addLayout(row)
+        edit.returnPressed.connect(dlg.accept)
+        # 拡張子を除いた部分を選択して編集しやすく
+        edit.setFocus()
+        stem = os.path.splitext(default_name)[0]
+        edit.setSelection(0, len(stem)) if stem else edit.selectAll()
+        ok = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
+        return edit.text().strip() if ok else None
+
     def _save_new_scene(self):
-        """現在ブラウザでリーブ中のフォルダを既定にして、新規シーンを保存する。"""
+        """現在開いているシーンを、命名規則の名前を初期値としたテキスト欄で編集して保存する。
+
+        保存先はブラウザでリーブ中のフォルダ（無ければ現シーンのフォルダ）。
+        ※ 空シーンは作らない。現在のシーンをそのまま指定名で保存する。
+        """
         try:
             import maya.cmds as cmds
         except ImportError:
             QMessageBox.information(
-                self, "SAVE NEW SCENE（スタンドアロンモード）",
-                "Maya 内で実行すると、現在リーブ中のフォルダを既定にした\n"
-                "保存ダイアログを表示し、新規シーンとして保存します。",
+                self, "保存（スタンドアロンモード）",
+                "Maya 内で実行すると、命名規則の名前を初期値にした保存ダイアログを表示し、\n"
+                "現在開いているシーンをその名前で保存します。",
                 QMessageBox.Ok,
             )
             return
 
-        # 保存先フォルダ: リーブ中フォルダ → 選択中ファイルのフォルダ → ルート
-        start = self._current_folder or ""
-        if not start and self._selected_path:
-            start = os.path.dirname(self._selected_path)
-        if not start and self.active_root:
-            start = str(self.active_root)
-        if not start or not os.path.isdir(start):
+        cur = cmds.file(q=True, sceneName=True) or ""
+        if not cur:
+            QMessageBox.warning(self, "保存",
+                                "保存する開いているシーンがありません。\n"
+                                "先に Maya でシーンを開く／作成してください。")
+            return
+
+        # 保存先: リーブ中フォルダ → 現シーンのフォルダ
+        target = ""
+        if self._current_folder and os.path.isdir(str(self._current_folder)):
+            target = str(self._current_folder)
+        if not target:
+            target = os.path.dirname(cur)
+        if not target or not os.path.isdir(target):
             self.statusLabel.setText("保存先フォルダが未確定です（ブラウザでフォルダを選択してください）")
             return
 
-        # 未保存の変更があれば確認（新規シーン作成で破棄されるため）
-        if cmds.file(q=True, modified=True):
+        # 既定名 = 命名規則の名前（現在のシーン名を初期値。ユーザーが編集可）
+        default_name = os.path.basename(cur)
+        name = self._prompt_save_name(default_name, target)
+        if not name:
+            return
+
+        # 拡張子補完（無ければ現在のシーンの拡張子、既定 .ma）
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in (".ma", ".mb"):
+            cur_ext = os.path.splitext(cur)[1].lower()
+            if cur_ext not in (".ma", ".mb"):
+                cur_ext = ".ma"
+            name += cur_ext
+            ext = cur_ext
+
+        save_path = os.path.join(target, name)
+        if os.path.exists(save_path):
             r = QMessageBox.question(
-                self, "新規シーン",
-                "現在のシーンに未保存の変更があります。\n"
-                "新規シーンを作成すると失われます。続行しますか？",
-                QMessageBox.Yes | QMessageBox.No,
-            )
+                self, "上書き確認",
+                "%s は既に存在します。上書きしますか？" % name,
+                QMessageBox.Yes | QMessageBox.No)
             if r != QMessageBox.Yes:
                 return
 
-        res = cmds.fileDialog2(
-            fileMode=0,
-            caption="Save New Scene",
-            startingDirectory=start,
-            fileFilter="Maya ASCII (*.ma);;Maya Binary (*.mb)",
-        )
-        if not res:
-            return
-        save_path = res[0]
-        ftype = "mayaAscii" if save_path.lower().endswith(".ma") else "mayaBinary"
+        ftype = "mayaAscii" if ext == ".ma" else "mayaBinary"
         try:
-            cmds.file(new=True, force=True)          # 新規シーン
             cmds.file(rename=save_path)
-            cmds.file(save=True, type=ftype)
+            cmds.file(save=True, type=ftype)   # 現在のシーンを保存（空シーンにしない）
         except Exception as e:
-            self.statusLabel.setText("▲  新規保存に失敗しました: %s" % e)
-            QMessageBox.warning(self, "新規保存失敗", str(e))
+            self.statusLabel.setText("▲  保存に失敗しました: %s" % e)
+            QMessageBox.warning(self, "保存失敗", str(e))
             return
-        self.statusLabel.setText(f"✓  新規シーンを保存しました: {Path(save_path).name}")
-        # カラムをリセットせず、保存先まで展開して反映
+        self.statusLabel.setText(f"✓  保存しました: {name} → {target}")
         self._reveal_saved(save_path)
 
 
