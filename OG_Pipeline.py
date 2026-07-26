@@ -59,7 +59,7 @@ WINDOW_OBJECT_NAME = "OGPipelineSceneOpenerWindow"   # 多重起動検出用の�
 SHOTLIST_OBJECT_NAME = "OGPipelineShotListWindow"    # ショットリスト単独起動用の識別名
 
 # バージョン（install.py の before/after 表示・ヘッダー表示に使用）
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # GitHub 配布・自動更新（install.py と同一値にすること）
 _GH_OWNER = "ogshaw03"
@@ -6983,82 +6983,26 @@ class OGPipelineWindow(QWidget):
             self.statusLabel.setText("▲  フォルダを開けませんでした")
 
     def _save_scene_as(self):
-        """別名保存。ブラウザで別の工程フォルダを選択中なら、その選択中フォルダに保存する。
-
-        ファイル名は現在のシーン名を初期値として引き継ぎ、手入力で変更できる。
-        Maya のホットキー／プロジェクトは変更しない。
-        """
+        """Maya 純正の『Save Scene As』ダイアログを開く。"""
         try:
-            import maya.cmds as cmds
+            import maya.mel as mel
         except ImportError:
             QMessageBox.information(
                 self, "SAVE AS（スタンドアロンモード）",
-                "Maya 内で実行すると、ブラウザで選択中のフォルダに、\n"
-                "現在のシーン名を初期値とした別名保存ダイアログを表示します。",
+                "Maya 内で実行すると、Maya 純正の『Save Scene As』ダイアログを開きます。",
                 QMessageBox.Ok,
             )
             return
-
-        cur = cmds.file(q=True, sceneName=True) or ""
-
-        # 保存先フォルダの優先順位:
-        #   1) ブラウザで選択中（リーブ中）のフォルダ ＝ 別工程を選んでいればそこ
-        #   2) 現在開いているシーンのフォルダ
-        #   3) 最後に選択したファイルのフォルダ / ワークスペース
-        target = ""
-        if self._current_folder and os.path.isdir(str(self._current_folder)):
-            target = str(self._current_folder)
-        if not target and cur:
-            target = os.path.dirname(cur)
-        if not target and self._selected_path:
-            target = os.path.dirname(self._selected_path)
-        if not target:
-            try:
-                target = cmds.workspace(q=True, dir=True)
-            except Exception:
-                target = ""
-        if not target or not os.path.isdir(target):
-            self.statusLabel.setText("保存先フォルダが未確定です（ブラウザでフォルダを選択してください）")
-            return
-
-        # 既定ファイル名 ＝ 現在のシーン名（拡張子込み）。手入力で変更可。
-        default_name = os.path.basename(cur) if cur else "untitled.ma"
-        name, ok = QInputDialog.getText(
-            self, "SAVE AS",
-            "保存先: %s\nファイル名:" % target, text=default_name)
-        if not ok or not name.strip():
-            return
-        name = name.strip()
-
-        # 拡張子の補完（無ければ現在のシーンの拡張子、既定 .ma）
-        ext = os.path.splitext(name)[1].lower()
-        if ext not in (".ma", ".mb"):
-            cur_ext = os.path.splitext(cur)[1].lower() if cur else ".ma"
-            if cur_ext not in (".ma", ".mb"):
-                cur_ext = ".ma"
-            name += cur_ext
-            ext = cur_ext
-
-        save_path = os.path.join(target, name)
-        if os.path.exists(save_path):
-            r = QMessageBox.question(
-                self, "上書き確認",
-                "%s は既に存在します。上書きしますか？" % name,
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if r != QMessageBox.Yes:
-                return
-
-        ftype = "mayaAscii" if ext == ".ma" else "mayaBinary"
         try:
-            cmds.file(rename=save_path)
-            cmds.file(save=True, type=ftype)
+            mel.eval("SaveSceneAs")
         except Exception as e:
-            self.statusLabel.setText("▲  保存に失敗しました: %s" % e)
-            QMessageBox.warning(self, "保存失敗", str(e))
-            return
-        self.statusLabel.setText(f"✓  保存しました: {name} → {target}")
-        self._reveal_saved(save_path)
+            try:
+                import maya.cmds as cmds
+                cmds.SaveSceneAs()
+            except Exception:
+                self.statusLabel.setText("▲  Save Scene As を開けませんでした: %s" % e)
+                return
+        self.statusLabel.setText("Maya の『Save Scene As』を開きました")
 
     def _save_new_scene(self):
         """現在ブラウザでリーブ中のフォルダを既定にして、新規シーンを保存する。"""
