@@ -26,6 +26,20 @@
 > まとめ: ショットリスト＝共有コード。Maya 依存を持ち込まない限り、変更は
 > スタンドアロンへ自動反映される。Maya 依存を足すときは必ずフォールバックを用意する。
 
+## 配布・自動更新（install.py / GitHub ホットアップデート）
+
+- 配布物はリポジトリ直下の **`install.py`**（エンドユーザーが Maya にドラッグ）。
+  install.py は GitHub から **`OG_Pipeline.py` 1ファイル**を SHA 固定 URL で取得して
+  Maya のユーザースクリプトに上書きし、シェルフボタン（左＝メイン起動／右クリック＝
+  メイン・ショットリスト・更新）を追加する。更新はメインUIの「⟳ 更新」または
+  シェルフ右クリック→「GitHub から更新」（`update_from_github` → `_run_github_update`
+  → `_reopen_after_update`、evalDeferred 3段）。
+- **リリース時は `OG_Pipeline.py` の `__version__` を必ず上げる**（install.py が
+  before→after 表示に使う。ヘッダー/タイトルにも出る）。
+- `_GH_OWNER` / `_GH_REPO` / `_GH_BRANCH` は **install.py と OG_Pipeline.py で同一値**に保つ。
+- Maya 用の実体は `OG_Pipeline.py` 単一ファイル（main＋AllShotsDialog＋open_shot_list を
+  内包）。`OG_ShotList.py` は Maya 非依存の独立起動用で install.py の取得対象外。
+
 ## 参考
 - UI 各部の呼称: `docs/UI_NAMING.md`
 - メイン起動: `OG_Pipeline.main()` ／ ショットリスト単独（Maya内）: `OG_Pipeline.open_shot_list()`

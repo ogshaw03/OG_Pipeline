@@ -57,6 +57,14 @@ except ImportError:
 MAYA_EXTENSIONS = {".ma", ".mb"}
 WINDOW_OBJECT_NAME = "OGPipelineSceneOpenerWindow"   # 多重起動検出用の安定識別名
 SHOTLIST_OBJECT_NAME = "OGPipelineShotListWindow"    # ショットリスト単独起動用の識別名
+
+# バージョン（install.py の before/after 表示・ヘッダー表示に使用）
+__version__ = "1.0.0"
+
+# GitHub 配布・自動更新（install.py と同一値にすること）
+_GH_OWNER = "ogshaw03"
+_GH_REPO = "OG_Pipeline"
+_GH_BRANCH = "main"
 VIDEO_SUBDIR = "Pipeline_Movie"                      # プレイブラスト出力フォルダ名
 VIDEO_EXTS = [".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v"]
 
@@ -5263,7 +5271,7 @@ class OGPipelineWindow(QWidget):
         self.setWindowFlags(Qt.Window)
         # 多重起動の検出に使う安定した識別名（reload してもクラスに依存しない）
         self.setObjectName(WINDOW_OBJECT_NAME)
-        self.setWindowTitle("OG_Pipeline — Scene Opener")
+        self.setWindowTitle("OG_Pipeline — Scene Opener  v%s" % __version__)
         self.setMinimumSize(1000, 680)
         self.resize(1240, 760)
 
@@ -5577,7 +5585,23 @@ class OGPipelineWindow(QWidget):
         self.settingsBtn.setToolTip("書き出し方式・保存時の動画自動更新などを設定")
         self.settingsBtn.clicked.connect(self._open_settings)
         layout.addWidget(self.settingsBtn)
+
+        # 右上: GitHub から更新（Maya 再起動なしで最新版に入れ替え）
+        self.updateBtn = QPushButton("⟳  更新")
+        self.updateBtn.setObjectName("refreshBtn")
+        self.updateBtn.setToolTip("GitHub から最新版を取得して入れ替えます（Maya 再起動不要）")
+        self.updateBtn.clicked.connect(self._on_update_clicked)
+        layout.addWidget(self.updateBtn)
         return bar
+
+    def _on_update_clicked(self):
+        r = QMessageBox.question(
+            self, "GitHub から更新",
+            "GitHub の最新版を取得してツールを入れ替えます。\n"
+            "開いているウィンドウは一度閉じ、更新後に開き直します。実行しますか？",
+            QMessageBox.Yes | QMessageBox.No)
+        if r == QMessageBox.Yes:
+            update_from_github()
 
     def _on_manual_method_changed(self, _idx):
         method = self.exportMethodCombo.currentData() or "playblast"
@@ -7211,6 +7235,101 @@ def open_shot_list():
     dlg.raise_()
     dlg.activateWindow()
     return dlg
+
+
+# ─── GitHub からの自動更新（Maya 再起動不要） ─────────────────────────────────
+def _gh_latest_sha():
+    """main の最新 commit SHA を返す。SHA 固定 URL が raw の CDN キャッシュ回避の要。"""
+    import json
+    import random
+    import time
+    from urllib.request import Request, urlopen
+    salt = "%.6f_%d" % (time.time(), random.randint(0, 2 ** 32))
+    url = "https://api.github.com/repos/%s/%s/branches/%s?_=%s" % (
+        _GH_OWNER, _GH_REPO, _GH_BRANCH, salt)
+    req = Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "Cache-Control": "no-cache",
+        "User-Agent": "OG_Pipeline-updater/%s" % salt,
+    })
+    with urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))["commit"]["sha"]
+
+
+def update_from_github(*_args):
+    """メインUIの『GitHubから更新』用。実処理は次の idle で行う（自ウィンドウ破棄対策）。"""
+    try:
+        import maya.cmds as cmds
+    except ImportError:
+        print("[OG_Pipeline] 更新は Maya 内でのみ実行できます。")
+        return
+    cmds.evalDeferred(_run_github_update, lowestPriority=True)
+
+
+def _run_github_update():
+    import sys
+    import traceback
+    from urllib.request import Request, urlopen
+    try:
+        import maya.cmds as cmds
+    except ImportError:
+        return
+    try:
+        sha = _gh_latest_sha()
+    except Exception as exc:
+        sha = _GH_BRANCH
+        print("[OG_Pipeline] SHA取得に失敗、ブランチ名で続行:", exc)
+    url = "https://raw.githubusercontent.com/%s/%s/%s/install.py" % (_GH_OWNER, _GH_REPO, sha)
+    print("[OG_Pipeline] 更新: install.py を取得 %s" % url)
+    try:
+        req = Request(url, headers={"Cache-Control": "no-cache",
+                                    "User-Agent": "OG_Pipeline-updater/%s" % sha[:10]})
+        source = urlopen(req, timeout=30).read()
+    except Exception as exc:
+        traceback.print_exc()
+        try:
+            cmds.confirmDialog(title="更新失敗",
+                               message="install.py の取得に失敗しました:\n%s" % exc,
+                               button=["OK"])
+        except Exception:
+            pass
+        return
+    # 既存ウィンドウ（メイン／ショットリスト）を閉じてから入れ替え
+    try:
+        _close_existing_windows()
+        _close_windows_named(SHOTLIST_OBJECT_NAME)
+    except Exception:
+        pass
+    ns = {"__name__": "install", "__file__": "<github>"}
+    try:
+        exec(compile(source, "install.py (from GitHub)", "exec"), ns)
+    except Exception as exc:
+        traceback.print_exc()
+        try:
+            cmds.confirmDialog(title="更新失敗",
+                               message="install.py 実行でエラー:\n%s\n\n"
+                                       "詳細はスクリプトエディタを参照。" % exc,
+                               button=["OK"])
+        except Exception:
+            pass
+        return
+    # 自分（OG_Pipeline）をフラッシュ → 次の idle で再import して開き直す
+    for m in [k for k in list(sys.modules) if k == "OG_Pipeline"]:
+        sys.modules.pop(m, None)
+    cmds.evalDeferred(_reopen_after_update, lowestPriority=True)
+
+
+def _reopen_after_update():
+    import importlib
+    import sys
+    import traceback
+    try:
+        if "OG_Pipeline" in sys.modules:
+            importlib.reload(sys.modules["OG_Pipeline"])
+        mod = importlib.import_module("OG_Pipeline")
+        mod.main()
+    except Exception:
+        traceback.print_exc()
 
 
 def main():
