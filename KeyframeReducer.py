@@ -26,7 +26,7 @@ except ImportError:                       # 将来の PySide6 対応
     from shiboken6 import wrapInstance
 
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 WINDOW = "keyframeReducerWin"
 
 # SELECT で選べるトランスフォーム種別（表示名, 内部キー, チャンネル）
@@ -124,6 +124,61 @@ def reduce_keys(sources, targets, mode, types):
 
 
 # --------------------------------------------------------------------------- #
+# ロケータ経由フルベイク（親子反転）
+# --------------------------------------------------------------------------- #
+_BAKE_ATTRS = ["translateX", "translateY", "translateZ",
+               "rotateX", "rotateY", "rotateZ"]
+
+
+def _playback_range():
+    return (cmds.playbackOptions(q=True, min=True),
+            cmds.playbackOptions(q=True, max=True))
+
+
+def bake_via_locator(objs):
+    """各オブジェクトについて次を一括実行する:
+      1. オブジェクトの位置にロケータ作成
+      2. オブジェクトを親にペアレントコンストレイン（ロケータがオブジェクトに追従）
+      3. ロケータをフルベイク（毎フレーム）
+      4. 親子反転（ロケータを親、オブジェクトを子）
+      5. オブジェクトをフルベイク
+    戻り値: 作成したロケータ名のリスト。
+    """
+    start, end = _playback_range()
+    created = []
+    cmds.undoInfo(openChunk=True)
+    try:
+        for obj in objs:
+            short = obj.split("|")[-1].split(":")[-1]
+            loc = cmds.spaceLocator(name="%s_bakeLoc" % short)[0]
+            # 1. 位置（＋回転）を合わせる
+            cmds.matchTransform(loc, obj, position=True, rotation=True)
+            # 2. オブジェクトが親 → ロケータが追従
+            pc1 = cmds.parentConstraint(obj, loc, maintainOffset=False)[0]
+            # 3. ロケータをフルベイク
+            cmds.bakeResults(loc, time=(start, end), attribute=_BAKE_ATTRS,
+                             sampleBy=1, simulation=True,
+                             preserveOutsideKeys=True,
+                             disableImplicitControl=True,
+                             sparseAnimCurveBake=False)
+            cmds.delete(pc1)
+            # 4. 親子反転（オブジェクトの既存キーを外してから、ロケータを親に）
+            cmds.cutKey(obj, attribute=_BAKE_ATTRS, clear=True)
+            pc2 = cmds.parentConstraint(loc, obj, maintainOffset=False)[0]
+            # 5. オブジェクトをフルベイク
+            cmds.bakeResults(obj, time=(start, end), attribute=_BAKE_ATTRS,
+                             sampleBy=1, simulation=True,
+                             preserveOutsideKeys=True,
+                             disableImplicitControl=True,
+                             sparseAnimCurveBake=False)
+            cmds.delete(pc2)
+            created.append(loc)
+    finally:
+        cmds.undoInfo(closeChunk=True)
+    return created
+
+
+# --------------------------------------------------------------------------- #
 # UI
 # --------------------------------------------------------------------------- #
 def _maya_main_window():
@@ -188,6 +243,19 @@ class KeyframeReducer(QtWidgets.QDialog):
         self._applyBtn.setMinimumHeight(30)
         self._applyBtn.clicked.connect(self._apply)
         lay.addWidget(self._applyBtn)
+
+        # ── ロケータ経由フルベイク（親子反転）───
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.HLine)
+        line.setFrameShadow(QtWidgets.QFrame.Sunken)
+        lay.addWidget(line)
+        self._bakeLocBtn = QtWidgets.QPushButton("ロケータ経由でフルベイク（親子反転）")
+        self._bakeLocBtn.setMinimumHeight(28)
+        self._bakeLocBtn.setToolTip(
+            "選択物の位置にロケータ作成 → 選択物を親にペアレントコンストレイン → "
+            "ロケータをフルベイク → 親子反転 → オブジェクトをフルベイク（複数可・Undo一括）")
+        self._bakeLocBtn.clicked.connect(self._bake_locator)
+        lay.addWidget(self._bakeLocBtn)
 
         self._status = QtWidgets.QLabel("")
         self._status.setStyleSheet("color: #999;")
@@ -270,6 +338,26 @@ class KeyframeReducer(QtWidgets.QDialog):
         if res["skipped"]:
             msg += " ／ Source と一致せずスキップ %d" % res["skipped"]
         self._status.setText("✓ " + msg)
+
+    def _bake_locator(self):
+        sel = cmds.ls(selection=True, long=True) or []
+        objs = [x for x in sel
+                if "transform" in (cmds.nodeType(x, inherited=True) or [])]
+        if not objs:
+            self._warn("ビューポートでオブジェクト（トランスフォーム）を選択してください。")
+            return
+        try:
+            locs = bake_via_locator(objs)
+        except Exception as e:
+            self._warn(str(e))
+            return
+        try:
+            cmds.select(objs, replace=True)
+        except Exception:
+            pass
+        self._status.setText(
+            "✓ ロケータ経由フルベイク完了: %d 個（ロケータ %d 作成）"
+            % (len(objs), len(locs)))
 
     def _warn(self, text):
         self._status.setText("▲ " + text)
