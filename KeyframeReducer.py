@@ -26,7 +26,7 @@ except ImportError:                       # 将来の PySide6 対応
     from shiboken6 import wrapInstance
 
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 WINDOW = "keyframeReducerWin"
 
 # SELECT で選べるトランスフォーム種別（表示名, 内部キー, チャンネル）
@@ -135,13 +135,21 @@ def _playback_range():
             cmds.playbackOptions(q=True, max=True))
 
 
-def bake_via_locator(objs):
-    """各オブジェクトについて次を一括実行する:
+def _bake_transform(node, start, end):
+    cmds.bakeResults(node, time=(start, end), attribute=_BAKE_ATTRS,
+                     sampleBy=1, simulation=True,
+                     preserveOutsideKeys=True,
+                     disableImplicitControl=True,
+                     sparseAnimCurveBake=False)
+
+
+def setup_locator_reverse(objs):
+    """フルベイク前までを一括実行する（ボタン①）:
       1. オブジェクトの位置にロケータ作成
-      2. オブジェクトを親にペアレントコンストレイン（ロケータがオブジェクトに追従）
+      2. オブジェクトを親にペアレントコンストレイン（ロケータが追従）
       3. ロケータをフルベイク（毎フレーム）
       4. 親子反転（ロケータを親、オブジェクトを子）
-      5. オブジェクトをフルベイク
+    ※ ここでは オブジェクトのフルベイクはしない（ロケータが駆動する状態で終わる）。
     戻り値: 作成したロケータ名のリスト。
     """
     start, end = _playback_range()
@@ -151,31 +159,38 @@ def bake_via_locator(objs):
         for obj in objs:
             short = obj.split("|")[-1].split(":")[-1]
             loc = cmds.spaceLocator(name="%s_bakeLoc" % short)[0]
-            # 1. 位置（＋回転）を合わせる
             cmds.matchTransform(loc, obj, position=True, rotation=True)
-            # 2. オブジェクトが親 → ロケータが追従
             pc1 = cmds.parentConstraint(obj, loc, maintainOffset=False)[0]
-            # 3. ロケータをフルベイク
-            cmds.bakeResults(loc, time=(start, end), attribute=_BAKE_ATTRS,
-                             sampleBy=1, simulation=True,
-                             preserveOutsideKeys=True,
-                             disableImplicitControl=True,
-                             sparseAnimCurveBake=False)
+            _bake_transform(loc, start, end)          # 3. ロケータをベイク
             cmds.delete(pc1)
-            # 4. 親子反転（オブジェクトの既存キーを外してから、ロケータを親に）
             cmds.cutKey(obj, attribute=_BAKE_ATTRS, clear=True)
-            pc2 = cmds.parentConstraint(loc, obj, maintainOffset=False)[0]
-            # 5. オブジェクトをフルベイク
-            cmds.bakeResults(obj, time=(start, end), attribute=_BAKE_ATTRS,
-                             sampleBy=1, simulation=True,
-                             preserveOutsideKeys=True,
-                             disableImplicitControl=True,
-                             sparseAnimCurveBake=False)
-            cmds.delete(pc2)
+            cmds.parentConstraint(loc, obj, maintainOffset=False)  # 4. 親子反転
             created.append(loc)
     finally:
         cmds.undoInfo(closeChunk=True)
     return created
+
+
+def bake_objects(objs):
+    """選択オブジェクトをフルベイクし、駆動している parentConstraint を削除する（ボタン②）。
+    戻り値: dict(baked=ベイクした数, constraints=削除した拘束数)。
+    """
+    start, end = _playback_range()
+    baked = 0
+    removed = 0
+    cmds.undoInfo(openChunk=True)
+    try:
+        for obj in objs:
+            _bake_transform(obj, start, end)
+            baked += 1
+            cons = cmds.listRelatives(obj, type="parentConstraint",
+                                      fullPath=True) or []
+            if cons:
+                cmds.delete(cons)
+                removed += len(cons)
+    finally:
+        cmds.undoInfo(closeChunk=True)
+    return {"baked": baked, "constraints": removed}
 
 
 # --------------------------------------------------------------------------- #
@@ -244,18 +259,27 @@ class KeyframeReducer(QtWidgets.QDialog):
         self._applyBtn.clicked.connect(self._apply)
         lay.addWidget(self._applyBtn)
 
-        # ── ロケータ経由フルベイク（親子反転）───
+        # ── ロケータ経由（2段階） ───
         line = QtWidgets.QFrame()
         line.setFrameShape(QtWidgets.QFrame.HLine)
         line.setFrameShadow(QtWidgets.QFrame.Sunken)
         lay.addWidget(line)
-        self._bakeLocBtn = QtWidgets.QPushButton("ロケータ経由でフルベイク（親子反転）")
-        self._bakeLocBtn.setMinimumHeight(28)
-        self._bakeLocBtn.setToolTip(
+        self._setupBtn = QtWidgets.QPushButton("① ロケータ作成〜親子反転（フルベイク前）")
+        self._setupBtn.setMinimumHeight(28)
+        self._setupBtn.setToolTip(
             "選択物の位置にロケータ作成 → 選択物を親にペアレントコンストレイン → "
-            "ロケータをフルベイク → 親子反転 → オブジェクトをフルベイク（複数可・Undo一括）")
-        self._bakeLocBtn.clicked.connect(self._bake_locator)
-        lay.addWidget(self._bakeLocBtn)
+            "ロケータをフルベイク → 親子反転。オブジェクトのフルベイクはしない"
+            "（ロケータが駆動する状態で止める・複数可・Undo一括）")
+        self._setupBtn.clicked.connect(self._setup_reverse)
+        lay.addWidget(self._setupBtn)
+
+        self._bakeObjBtn = QtWidgets.QPushButton("② オブジェクトをフルベイク")
+        self._bakeObjBtn.setMinimumHeight(28)
+        self._bakeObjBtn.setToolTip(
+            "選択オブジェクトをフルベイクし、駆動している parentConstraint を削除する"
+            "（①のあと、必要ならロケータを編集してから押す・複数可・Undo一括）")
+        self._bakeObjBtn.clicked.connect(self._bake_objects)
+        lay.addWidget(self._bakeObjBtn)
 
         self._status = QtWidgets.QLabel("")
         self._status.setStyleSheet("color: #999;")
@@ -339,15 +363,18 @@ class KeyframeReducer(QtWidgets.QDialog):
             msg += " ／ Source と一致せずスキップ %d" % res["skipped"]
         self._status.setText("✓ " + msg)
 
-    def _bake_locator(self):
+    def _selected_transforms(self):
         sel = cmds.ls(selection=True, long=True) or []
-        objs = [x for x in sel
+        return [x for x in sel
                 if "transform" in (cmds.nodeType(x, inherited=True) or [])]
+
+    def _setup_reverse(self):
+        objs = self._selected_transforms()
         if not objs:
             self._warn("ビューポートでオブジェクト（トランスフォーム）を選択してください。")
             return
         try:
-            locs = bake_via_locator(objs)
+            locs = setup_locator_reverse(objs)
         except Exception as e:
             self._warn(str(e))
             return
@@ -356,8 +383,22 @@ class KeyframeReducer(QtWidgets.QDialog):
         except Exception:
             pass
         self._status.setText(
-            "✓ ロケータ経由フルベイク完了: %d 個（ロケータ %d 作成）"
+            "✓ ①完了: %d 個をロケータ駆動に（ロケータ %d 作成）。必要なら編集して②へ。"
             % (len(objs), len(locs)))
+
+    def _bake_objects(self):
+        objs = self._selected_transforms()
+        if not objs:
+            self._warn("ビューポートでオブジェクト（トランスフォーム）を選択してください。")
+            return
+        try:
+            res = bake_objects(objs)
+        except Exception as e:
+            self._warn(str(e))
+            return
+        self._status.setText(
+            "✓ ②完了: %d 個をフルベイク（拘束 %d 削除）"
+            % (res["baked"], res["constraints"]))
 
     def _warn(self, text):
         self._status.setText("▲ " + text)
