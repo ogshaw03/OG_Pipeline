@@ -291,3 +291,9 @@ def show():
     win.raise_()
     win.activateWindow()
     return win
+
+
+# このファイルの内容をそのまま Maya の Script Editor に貼り付けて実行すると起動する。
+# （import した場合は __name__ が "__main__" にならないので自動起動しない）
+if __name__ == "__main__":
+    show()
